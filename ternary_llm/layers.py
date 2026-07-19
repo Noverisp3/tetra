@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from .quantization import FusedTernaryLinear, TernaryQuantizer
+from .quantization import FusedTernaryLinear, TernaryQuantizer, StochasticBitFlipLinear, init_ternary_weight
 
 
 class RMSNorm(nn.Module):
@@ -82,3 +82,60 @@ class TernaryLinear(nn.Module):
         return math.ceil(math.log2(3)) * self.latent_weights.numel()
 
 
+class StochasticTernaryLinear(nn.Module):
+    """Ternary linear layer với Stochastic Bit-Flip training.
+
+    Không có latent weights FP32. Trọng số luôn là ternary {-1,0,+1}
+    dưới dạng packed 2-bit. Gradient tích lũy vào accumulator, flip khi
+    vượt threshold.
+
+    Args:
+        in_features: input dimension
+        out_features: output dimension
+        bias: whether to use bias
+        scale: ternary weight scale factor (default: 1.0)
+        threshold: flip threshold (default: 0.5)
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        scale: float = 1.0,
+        threshold: float = 0.5,
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.scale = scale
+        self.threshold = threshold
+
+        # Packed 2-bit ternary weights (4 weights/byte)
+        packed = init_ternary_weight(out_features, in_features, sparsity=0.5)
+        self.register_buffer('packed_weights', packed)
+
+        # Gradient accumulator (FP32)
+        self.register_buffer('accumulator', torch.zeros(out_features, in_features))
+
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(out_features))
+        else:
+            self.register_parameter("bias", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        output = StochasticBitFlipLinear.apply(
+            x, self.packed_weights, (self.out_features, self.in_features),
+            self.scale, self.accumulator, self.threshold
+        )
+        if self.bias is not None:
+            output = output + self.bias
+        return output
+
+    @torch.no_grad()
+    def get_ternary_weights(self) -> torch.Tensor:
+        from .quantization import unpack_ternary_tensor
+        return unpack_ternary_tensor(self.packed_weights, (self.out_features, self.in_features))
+
+    def get_num_bits(self) -> int:
+        return self.out_features * self.in_features * 2  # 2 bits per weight

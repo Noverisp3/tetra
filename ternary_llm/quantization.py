@@ -159,3 +159,105 @@ def unpack_ternary(packed: bytes, shape: tuple, device: str = "cpu") -> torch.Te
     return torch.from_numpy(flat.astype(np.float32)).reshape(shape).to(device)
 
 
+# ─── Fast Tensor Pack/Unpack cho Stochastic Bit-Flip ───────────────────────
+
+def pack_ternary_tensor(w: torch.Tensor) -> torch.Tensor:
+    """Pack ternary float tensor {-1, 0, +1} → uint8 tensor (4 weights/byte)."""
+    w_u8 = (w + 1).to(torch.uint8)  # -1→0, 0→1, +1→2
+    flat = w_u8.flatten()
+    n = flat.size(0)
+    padded = (n + 3) // 4 * 4
+    if padded != n:
+        flat = torch.nn.functional.pad(flat, (0, padded - n), value=1)
+    flat = flat.view(-1, 4)
+    packed = (flat[:, 0] << 6) | (flat[:, 1] << 4) | (flat[:, 2] << 2) | flat[:, 3]
+    return packed.contiguous()
+
+
+def unpack_ternary_tensor(packed: torch.Tensor, shape: tuple) -> torch.Tensor:
+    """Unpack uint8 tensor → float tensor {-1, 0, +1}."""
+    w0 = ((packed >> 6) & 3).to(torch.int8) - 1
+    w1 = ((packed >> 4) & 3).to(torch.int8) - 1
+    w2 = ((packed >> 2) & 3).to(torch.int8) - 1
+    w3 = (packed & 3).to(torch.int8) - 1
+    flat = torch.stack([w0, w1, w2, w3], dim=-1).flatten()
+    total = 1
+    for d in shape:
+        total *= d
+    flat = flat[:total]
+    return flat.float().reshape(shape)
+
+
+def init_ternary_weight(out_features: int, in_features: int, sparsity: float = 0.5) -> torch.Tensor:
+    """Initialize packed ternary weights with given sparsity.
+
+    sparsity=0.5 → 50% zeros, 25% +1, 25% -1 (kaiming-like).
+    Returns flat uint8 packed tensor.
+    """
+    n = out_features * in_features
+    nz = int(n * (1 - sparsity))  # non-zero count
+    w = torch.zeros(n, dtype=torch.uint8)
+    if nz > 0:
+        pos = nz // 2
+        neg = nz - pos
+        idx = torch.randperm(n)
+        w[idx[:pos]] = 2   # +1
+        w[idx[pos:pos + neg]] = 0  # -1 (encoded as 0, i.e. value -1+1=0)
+    # Pad và pack
+    padded = (n + 3) // 4 * 4
+    if padded != n:
+        w = torch.nn.functional.pad(w, (0, padded - n), value=1)
+    w = w.view(-1, 4)
+    packed = (w[:, 0] << 6) | (w[:, 1] << 4) | (w[:, 2] << 2) | w[:, 3]
+    return packed.contiguous()
+
+
+# ─── Stochastic Bit-Flip Autograd ─────────────────────────────────────────
+
+class StochasticBitFlipLinear(torch.autograd.Function):
+    """Stochastic Bit-Flip training cho ternary weights.
+
+    Forward: unpack 2-bit → ternary float → scale → matmul
+    Backward: accumulate gradient → lật bit khi vượt threshold
+    """
+
+    @staticmethod
+    def forward(ctx, x, packed_flat, shape_w, scale, accumulator, threshold):
+        w_ternary = unpack_ternary_tensor(packed_flat, shape_w).to(x.dtype) * scale
+        ctx.save_for_backward(x)
+        ctx.packed_flat = packed_flat
+        ctx.shape_w = shape_w
+        ctx.scale = scale
+        ctx.accumulator = accumulator
+        ctx.threshold = threshold
+        return F.linear(x, w_ternary)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, = ctx.saved_tensors
+        scale = ctx.scale
+        in_features = x.size(-1)
+
+        w_ternary = unpack_ternary_tensor(ctx.packed_flat, ctx.shape_w).to(x.dtype) * scale
+        grad_output_flat = grad_output.reshape(-1, grad_output.size(-1))
+        grad_x_flat = torch.mm(grad_output_flat, w_ternary)
+        grad_x = grad_x_flat.view(*x.shape[:-1], in_features)
+
+        grad_w = torch.mm(
+            grad_output_flat.T,
+            x.reshape(-1, x.size(-1))
+        )
+
+        with torch.no_grad():
+            ctx.accumulator.add_(grad_w / scale)
+            flip_up = ctx.accumulator > ctx.threshold
+            flip_down = ctx.accumulator < -ctx.threshold
+
+            if flip_up.any() or flip_down.any():
+                w_curr = unpack_ternary_tensor(ctx.packed_flat, ctx.shape_w).to(x.device)
+                flip_dir = torch.where(flip_up, 1.0, 0.0) + torch.where(flip_down, -1.0, 0.0)
+                w_new = (w_curr + flip_dir).clamp(-1, 1)
+                ctx.packed_flat.copy_(pack_ternary_tensor(w_new).to(ctx.packed_flat.device))
+                ctx.accumulator[flip_up | flip_down] = 0.0
+
+        return grad_x, None, None, None, None, None
