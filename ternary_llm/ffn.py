@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .layers import TernaryLinear
+from .quantization import TernaryQuantizer
 
 
 class TernaryFFN(nn.Module):
@@ -14,6 +15,8 @@ class TernaryFFN(nn.Module):
         - Activation: SiLU (float, not quantized)
 
     SwiGLU: output = (SiLU(x @ W_gate) * (x @ W_up)) @ W_down
+
+    Fused gate+up: single ternary matmul with 2*ffn_dim output, then chunk.
 
     Args:
         hidden_dim: model dimension
@@ -37,12 +40,16 @@ class TernaryFFN(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # SwiGLU activation
-        gate = F.silu(self.gate_proj(x))
-        up = self.up_proj(x)
+        # Fused gate+up: one ternary matmul instead of two
+        w_gate = TernaryQuantizer.apply(self.gate_proj.latent_weights)
+        w_up = TernaryQuantizer.apply(self.up_proj.latent_weights)
+        w_fused = torch.cat([w_gate, w_up], dim=0)
 
-        # Element-wise multiply
-        hidden = gate * up
+        fused_out = F.linear(x, w_fused)
+        gate, up = fused_out.chunk(2, dim=-1)
+
+        # SwiGLU activation
+        hidden = F.silu(gate) * up
 
         # Down projection
         output = self.down_proj(hidden)

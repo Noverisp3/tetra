@@ -1,9 +1,10 @@
 """Main training script for Tetra (Ternary LLM).
 
 Usage:
-    python train.py                    # Train with default config
-    python train.py --steps 50000      # Train for 50000 steps
-    python train.py --resume checkpoint_latest.pt
+    python train.py                              # Train with default (tiny) config
+    python train.py --preset 500m --steps 10000  # Train 500M config
+    python train.py --resume                     # Auto-resume from latest checkpoint
+    python train.py --resume checkpoints/checkpoint_000500.pt  # Resume from specific
 """
 import sys
 import argparse
@@ -12,36 +13,64 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from ternary_llm.transformer import TernaryTransformerModel
-from ternary_llm.data import download_and_tokenize, create_dataloaders, get_tokenizer_compat
+from ternary_llm.data import (
+    download_and_tokenize, create_dataloaders,
+    create_multi_source_dataloaders, get_tokenizer_compat,
+)
 from ternary_llm.trainer import TernaryTrainer, TrainingConfig
+
+PRESETS = {
+    "tiny":   dict(hidden_dim=128, num_layers=4,  num_heads=4,  ffn_dim=512),
+    "medium": dict(hidden_dim=512, num_layers=12, num_heads=8,  ffn_dim=2048),
+    "large":  dict(hidden_dim=768, num_layers=12, num_heads=12, ffn_dim=2048),
+    "500m":   dict(hidden_dim=2560, num_layers=6,  num_heads=40, ffn_dim=6826),
+}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train Tetra")
+    parser.add_argument("--preset", type=str, default=None, choices=["tiny", "medium", "large", "500m"],
+                        help="Model size preset (overrides hidden/layers/heads/ffn)")
     parser.add_argument("--steps", type=int, default=None, help="Max training steps")
     parser.add_argument("--lr", type=float, default=None, help="Learning rate")
     parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
+    parser.add_argument("--grad-accum", type=int, default=None, help="Gradient accumulation steps")
     parser.add_argument("--block-size", type=int, default=None, help="Block size (context length)")
     parser.add_argument("--hidden-dim", type=int, default=None, help="Hidden dimension")
     parser.add_argument("--num-layers", type=int, default=None, help="Number of layers")
     parser.add_argument("--num-heads", type=int, default=None, help="Number of attention heads")
     parser.add_argument("--ffn-dim", type=int, default=None, help="FFN intermediate dim")
-    parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
-    parser.add_argument("--data-dir", type=str, default="data", help="Data directory")
+    parser.add_argument("--resume", nargs="?", const="auto", default=None,
+                        help="Resume from checkpoint (no arg = auto-find latest)")
+    parser.add_argument("--data-dir", type=str, default="data", help="Data directory (legacy TinyStories)")
+    parser.add_argument("--data-cache", type=str, default=None, help="Multi-source data cache dir (data_cache/)")
     parser.add_argument("--tokenizer-dir", type=str, default="tokenizer", help="Tokenizer directory")
     parser.add_argument("--save-dir", type=str, default="checkpoints", help="Save directory")
     parser.add_argument("--max-stories", type=int, default=None, help="Max stories to load")
+    parser.add_argument("--device", type=str, default=None, choices=["cpu", "cuda", "directml"],
+                        help="Force device (default: auto-detect)")
+    parser.add_argument("--hybrid", action="store_true",
+                        help="Hybrid mode: model on GPU, optimizer on CPU (avoids DML fallbacks)")
     args = parser.parse_args()
 
     config = TrainingConfig()
 
-    # Override from args
+    # Apply preset
+    if args.preset:
+        preset = PRESETS[args.preset]
+        for k, v in preset.items():
+            setattr(config, k, v)
+        print(f"  Using preset: {args.preset} ({sum(v*v*4 for v in [preset['hidden_dim']]*3):,}+ params)")
+
+    # Override from args (highest priority)
     if args.steps:
         config.max_steps = args.steps
     if args.lr:
         config.learning_rate = args.lr
     if args.batch_size:
         config.batch_size = args.batch_size
+    if args.grad_accum:
+        config.gradient_accumulation_steps = args.grad_accum
     if args.block_size:
         config.block_size = args.block_size
     if args.hidden_dim:
@@ -54,24 +83,49 @@ def main():
         config.ffn_dim = args.ffn_dim
     config.data_dir = args.data_dir
     config.save_dir = args.save_dir
+    if args.device:
+        config.device = args.device
+    if args.hybrid:
+        config.hybrid_optimizer = True
 
-    # Step 1: Download and tokenize data
-    print("\n[1/4] Preparing data...")
-    tokens, metadata = download_and_tokenize(
-        cache_dir=config.data_dir,
-        tokenizer_dir=args.tokenizer_dir,
-        max_stories=args.max_stories,
-    )
-    config.vocab_size = metadata["vocab_size"]
+    # Step 1: Prepare data
+    if args.data_cache:
+        print("\n[1/4] Loading multi-source data...")
+        data_cache = Path(args.data_cache)
+        if not data_cache.exists():
+            print(f"  ERROR: {data_cache} not found. Run prepare_data.py first.")
+            sys.exit(1)
+        import json
+        with open(data_cache / "manifest.json") as f:
+            manifest = json.load(f)
+        config.vocab_size = manifest["vocab_size"]
+        print(f"  Sources: {list(manifest['sources'].keys())}")
+        print(f"  Total tokens: {manifest['total_tokens']:,}")
+    else:
+        print("\n[1/4] Preparing data (TinyStories)...")
+        tokens, metadata = download_and_tokenize(
+            cache_dir=config.data_dir,
+            tokenizer_dir=args.tokenizer_dir,
+            max_stories=args.max_stories,
+        )
+        config.vocab_size = metadata["vocab_size"]
 
     # Step 2: Create dataloaders
     print("\n[2/4] Creating dataloaders...")
-    train_loader, val_loader = create_dataloaders(
-        tokens=tokens,
-        block_size=config.block_size,
-        batch_size=config.batch_size,
-        val_split=config.val_split,
-    )
+    if args.data_cache:
+        train_loader, val_loader = create_multi_source_dataloaders(
+            data_dir=args.data_cache,
+            block_size=config.block_size,
+            batch_size=config.batch_size,
+            val_split=config.val_split,
+        )
+    else:
+        train_loader, val_loader = create_dataloaders(
+            tokens=tokens,
+            block_size=config.block_size,
+            batch_size=config.batch_size,
+            val_split=config.val_split,
+        )
 
     # Step 3: Create model
     print("\n[3/4] Creating model...")
@@ -89,10 +143,9 @@ def main():
         p.numel() for name, p in model.named_parameters()
         if "latent_weights" in name
     )
-    emb_params = sum(p.numel() for p in model.parameters() if "embedding" in p.shape.__repr__() or "embed" in "")
     print(f"  Total params: {total_params:,}")
-    print(f"  Ternary params: {ternary_params:,} ({ternary_params * 2 / 8 / 1024:.1f} KB packed)")
-    print(f"  FP32 params: {total_params - ternary_params:,}")
+    print(f"  Ternary params: {ternary_params:,} ({ternary_params * 2 / 8 / 1024:.0f} KB packed)")
+    print(f"  FP32 params: {total_params - ternary_params:,} ({(total_params - ternary_params) * 4 / 1024:.0f} KB)")
 
     # Step 4: Train
     print("\n[4/4] Starting training...")
@@ -104,7 +157,19 @@ def main():
     )
 
     if args.resume:
-        start_step = trainer.load_checkpoint(args.resume)
+        if args.resume == "auto":
+            checkpoints = sorted(Path(config.save_dir).glob("checkpoint_*.pt"))
+            if checkpoints:
+                resume_path = str(checkpoints[-1])
+            else:
+                print("  No checkpoints found, starting fresh")
+                resume_path = None
+        else:
+            resume_path = args.resume
+        if resume_path:
+            start_step = trainer.load_checkpoint(resume_path)
+        else:
+            start_step = 0
     else:
         start_step = 0
 

@@ -75,27 +75,24 @@ def python_inference(model_path, prompt_tokens, max_tokens, temperature, top_k=5
 
     enc = get_tokenizer_compat()
 
-    candidates = [
-        "checkpoints/checkpoint_latest.pt",
-    ]
+    candidates = sorted(Path("checkpoints").glob("checkpoint_*.pt"))
 
     model = None
-    for c in candidates:
-        if Path(c).exists():
-            ckpt = torch.load(c, map_location="cpu", weights_only=False)
-            config = ckpt["config"]
-            model = TernaryTransformerModel(
-                vocab_size=config["vocab_size"],
-                hidden_dim=config["hidden_dim"],
-                num_layers=config["num_layers"],
-                num_heads=config["num_heads"],
-                ffn_dim=config["ffn_dim"],
-                max_seq_len=config["max_seq_len"],
-            )
-            model.load_state_dict(ckpt["model_state_dict"])
-            model.eval()
-            print(f"Loaded from {c}")
-            break
+    if candidates:
+        c = candidates[-1]
+        ckpt = torch.load(c, map_location="cpu", weights_only=False)
+        config = ckpt["config"]
+        model = TernaryTransformerModel(
+            vocab_size=config["vocab_size"],
+            hidden_dim=config["hidden_dim"],
+            num_layers=config["num_layers"],
+            num_heads=config["num_heads"],
+            ffn_dim=config["ffn_dim"],
+            max_seq_len=config["max_seq_len"],
+        )
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.eval()
+        print(f"Loaded from {c}")
 
     if model is None:
         print("ERROR: No checkpoint found")

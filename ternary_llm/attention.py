@@ -59,19 +59,13 @@ class TernaryMultiHeadAttention(nn.Module):
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Attention scores: scaled dot product
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-
-        # Apply mask if provided (causal mask for decoder)
-        if mask is not None:
-            attn_weights = attn_weights.masked_fill(mask == 0, float("-inf"))
-
-        # Softmax (in practice, could use INT8 approximation)
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        attn_weights = self.attn_dropout(attn_weights)
-
-        # Weighted sum
-        attn_output = torch.matmul(attn_weights, v)
+        # Fused attention: softmax(QK^T/sqrt(d)) @ V — single kernel, no intermediate attn_weights
+        dropout_p = self.attn_dropout.p if self.training else 0.0
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=dropout_p,
+            is_causal=(mask is None),
+        )
 
         # Reshape and project output
         attn_output = (

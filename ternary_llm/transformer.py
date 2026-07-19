@@ -140,11 +140,6 @@ class TernaryTransformerModel(nn.Module):
         """
         batch_size, seq_len = input_ids.shape
 
-        # Create causal mask
-        mask = torch.tril(
-            torch.ones(seq_len, seq_len, device=input_ids.device)
-        ).unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, seq_len)
-
         # Embeddings
         positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
         x = self.token_embedding(input_ids) + self.pos_embedding(positions)
@@ -152,7 +147,7 @@ class TernaryTransformerModel(nn.Module):
 
         # Transformer layers
         for layer in self.layers:
-            x = layer(x, mask=mask)
+            x = layer(x)
 
         # Final norm
         x = self.norm(x)
@@ -189,7 +184,6 @@ class TernaryTransformerModel(nn.Module):
 
             # Get last token logits
             logits = logits[:, -1, :] / temperature
-            logits = torch.nan_to_num(logits)
 
             # Top-k filtering
             if top_k is not None:
@@ -198,9 +192,6 @@ class TernaryTransformerModel(nn.Module):
 
             # Sample
             probs = nn.functional.softmax(logits, dim=-1)
-            probs = torch.nan_to_num(probs)
-            probs = probs.clamp(min=1e-10)
-            probs = probs / probs.sum(dim=-1, keepdim=True)
             idx_next = torch.multinomial(probs, num_samples=1)
 
             # Clamp to vocab size

@@ -185,3 +185,131 @@ def create_dataloaders(tokens, block_size=128, batch_size=8, val_split=0.05):
     )
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
     return train_loader, val_loader
+
+
+# --- Multi-Source Dataset -------------------------------------------
+
+class MultiSourceChunkedDataset(Dataset):
+    """Reads multiple .bin chunk files from different sources,
+    samples according to configured ratios.
+
+    Directory structure:
+        data_cache/
+            manifest.json       # source metadata + ratios
+            fineweb_0000.bin    # uint16 token chunks
+            cosmopedia_0000.bin
+            orca_0000.bin
+            ...
+    """
+    def __init__(self, data_dir, block_size, val_split=0.05):
+        data_dir = Path(data_dir)
+        with open(data_dir / "manifest.json") as f:
+            self.manifest = json.load(f)
+
+        self.block_size = block_size
+        self.sources = {}  # name -> {"chunks": [path, ...], "ratio": float, "offsets": [int]}
+        self.total_chunks = 0
+        self.rng = np.random.default_rng(42)
+
+        # Load chunk files per source
+        for src_name, src_info in self.manifest["sources"].items():
+            chunks = sorted(data_dir.glob(f"{src_name}_*.bin"))
+            if not chunks:
+                print(f"  WARNING: No chunks found for source '{src_name}'")
+                continue
+
+            # Compute token count per chunk
+            chunk_entries = []
+            for chunk_path in chunks:
+                n_bytes = chunk_path.stat().st_size
+                n_tokens = n_bytes // 2  # uint16 = 2 bytes
+                n_blocks = n_tokens // block_size
+                if n_blocks > 0:
+                    chunk_entries.append({"path": chunk_path, "n_blocks": n_blocks})
+
+            if not chunk_entries:
+                continue
+
+            self.sources[src_name] = {
+                "chunks": chunk_entries,
+                "ratio": src_info["ratio"],
+                "cum_blocks": [],  # cumulative block count for index mapping
+            }
+            cum = 0
+            for ce in chunk_entries:
+                self.sources[src_name]["cum_blocks"].append(cum)
+                cum += ce["n_blocks"]
+            self.sources[src_name]["total_blocks"] = cum
+            self.total_chunks += cum
+
+        if not self.sources:
+            raise RuntimeError(f"No valid chunks found in {data_dir}")
+
+        print(f"  MultiSourceChunkedDataset:")
+        for name, src in self.sources.items():
+            print(f"    {name}: {src['total_blocks']:,} blocks ({len(src['chunks'])} chunks, ratio={src['ratio']:.0%})")
+        print(f"    Total: {self.total_chunks:,} blocks")
+
+        # Split into train/val
+        self.val_start = int(self.total_chunks * (1 - val_split))
+        self.n_samples = self.val_start  # train portion
+
+    def __len__(self):
+        return self.n_samples
+
+    def _get_source_for_index(self, global_idx):
+        """Pick a source by ratio, then map global index to local block."""
+        # Weighted random source selection (deterministic per sample for reproducibility)
+        r = self.rng.random()
+        cum = 0.0
+        chosen = None
+        for name, src in self.sources.items():
+            cum += src["ratio"]
+            if r < cum:
+                chosen = name
+                break
+        if chosen is None:
+            chosen = list(self.sources.keys())[-1]
+
+        # Map to a block within this source (round-robin for coverage)
+        src = self.sources[chosen]
+        local_idx = global_idx % src["total_blocks"]
+
+        # Find which chunk file this falls into
+        chunk_entries = src["chunks"]
+        cum_blocks = src["cum_blocks"]
+        for ci, ce in enumerate(chunk_entries):
+            if local_idx < cum_blocks[ci] + ce["n_blocks"]:
+                offset_in_chunk = (local_idx - cum_blocks[ci]) * self.block_size
+                return ce["path"], offset_in_chunk
+        # Fallback
+        ce = chunk_entries[0]
+        return ce["path"], 0
+
+    def __getitem__(self, idx):
+        if idx >= self.val_start:
+            idx = idx + (self.total_chunks - self.val_start)
+
+        chunk_path, offset = self._get_source_for_index(idx)
+        tokens = np.memmap(str(chunk_path), dtype=np.uint16, mode="r")
+        x = torch.from_numpy(tokens[offset:offset + self.block_size].astype(np.int64))
+        y = torch.from_numpy(tokens[offset + 1:offset + self.block_size + 1].astype(np.int64))
+        return x, y
+
+
+def create_multi_source_dataloaders(data_dir, block_size=128, batch_size=8, val_split=0.05):
+    """Create train/val dataloaders from multi-source chunks."""
+    ds = MultiSourceChunkedDataset(data_dir, block_size, val_split=val_split)
+    n_val = ds.total_chunks - ds.val_start
+
+    train_ds = ds
+    val_ds = MultiSourceChunkedDataset(data_dir, block_size, val_split=val_split)
+
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=0,
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False, num_workers=0,
+    )
+    print(f"Train samples: {len(train_ds):,} | Val samples: {n_val:,}")
+    return train_loader, val_loader

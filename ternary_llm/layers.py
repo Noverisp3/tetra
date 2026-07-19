@@ -19,8 +19,9 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        rms = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
-        return (x.float() * rms).type_as(x) * self.weight
+        x_f = x.float()
+        rms = x_f.pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
+        return (x_f * rms).type_as(x) * self.weight
 
 
 class TernaryLinear(nn.Module):
