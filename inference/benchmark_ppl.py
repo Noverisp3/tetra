@@ -39,8 +39,8 @@ def compute_ppl_pytorch(model, tokens, block_size=128, max_batches=200):
     with torch.no_grad():
         for i in range(0, min(n_batches * block_size, len(tokens) - block_size), block_size):
             chunk = tokens[i:i + block_size + 1]
-            x = torch.tensor([chunk[:-1]], dtype=torch.long, device=device)
-            y = torch.tensor([chunk[1:]], dtype=torch.long, device=device)
+            x = torch.tensor(np.array([chunk[:-1]]), dtype=torch.long, device=device)
+            y = torch.tensor(np.array([chunk[1:]]), dtype=torch.long, device=device)
 
             logits, loss = model(x, y)
             # loss is already cross-entropy averaged over seq_len
