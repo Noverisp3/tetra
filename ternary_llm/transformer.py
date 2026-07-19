@@ -135,6 +135,11 @@ class TernaryTransformerModel(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
+    def _apply(self, fn):
+        super()._apply(fn)
+        self.lm_head.weight = self.token_embedding.weight
+        return self
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -260,6 +265,11 @@ class StochasticTransformerModel(nn.Module):
         self.lm_head = nn.Linear(hidden_dim, vocab_size, bias=False)
         self.lm_head.weight = self.token_embedding.weight
         self.dropout = nn.Dropout(dropout)
+
+    def _apply(self, fn):
+        super()._apply(fn)
+        self.lm_head.weight = self.token_embedding.weight
+        return self
 
     def forward(self, input_ids, targets=None):
         B, T = input_ids.shape
