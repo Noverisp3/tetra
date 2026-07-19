@@ -194,7 +194,7 @@ class MultiSourceChunkedDataset(Dataset):
     samples according to configured ratios.
 
     Directory structure:
-        data_cache/
+        data/
             manifest.json       # source metadata + ratios
             fineweb_0000.bin    # uint16 token chunks
             cosmopedia_0000.bin

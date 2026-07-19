@@ -43,7 +43,7 @@ def main():
     parser.add_argument("--resume", nargs="?", const="auto", default=None,
                         help="Resume from checkpoint (no arg = auto-find latest)")
     parser.add_argument("--data-dir", type=str, default="data", help="Data directory (legacy TinyStories)")
-    parser.add_argument("--data-cache", type=str, default=None, help="Multi-source data cache dir (data_cache/)")
+    parser.add_argument("--data-cache", type=str, default=None, help="Multi-source data dir (data/)")
     parser.add_argument("--tokenizer-dir", type=str, default="tokenizer", help="Tokenizer directory")
     parser.add_argument("--save-dir", type=str, default="checkpoints", help="Save directory")
     parser.add_argument("--max-stories", type=int, default=None, help="Max stories to load")
