@@ -35,7 +35,7 @@ class TrainingConfig:
 
     # Training
     batch_size: int = 16
-    gradient_accumulation_steps: int = 4
+    gradient_accumulation_steps: int = 1  # effective batch = 16
     max_steps: int = 10000
     learning_rate: float = 1e-3
     min_lr: float = 1e-4
@@ -361,20 +361,31 @@ class TernaryTrainer:
 
         STE mode: latent weights → FP16, optimizer states → FP16.
         Stochastic mode: packed ternary + accumulators saved directly.
+        Packed ternary (2-bit) always included for inference export.
         """
+        from .quantization import pack_ternary, ternary_quantize
+
         is_stochastic = self.config.mode == "stochastic"
+        state_dict = {}
+        inference_data = {}
 
         if is_stochastic:
+            # Stochastic: packed weights + accumulators are already compact
             state_dict = self.model.state_dict()
+            inference_data = {
+                k: {"packed": v.cpu(), "shape": list(v.shape) if "packed" in k else None}
+                for k, v in state_dict.items() if "packed_weights" in k
+            }
+            # Downcast accumulators to FP16 for storage
             for k, v in state_dict.items():
                 if "accumulator" in k and v.is_floating_point():
                     state_dict[k] = v.half()
         else:
-            # STE: convert latent to FP16 on device (fast), keep rest as-is
-            state_dict = {}
+            # STE: latent weights → FP16 (preserves precision for training resume)
             for k, v in self.model.state_dict().items():
                 if "latent_weights" in k:
                     state_dict[k] = v.half()
+                    inference_data[k] = {"packed": pack_ternary(ternary_quantize(v.data)), "shape": list(v.shape)}
                 else:
                     state_dict[k] = v
 
@@ -385,6 +396,7 @@ class TernaryTrainer:
         checkpoint = {
             "step": step,
             "model_state_dict": state_dict,
+            "inference_ternary": inference_data,
             "optimizer_state_dict": opt_state,
             "config": self.config.__dict__,
             "train_losses": self.train_losses,
@@ -396,16 +408,8 @@ class TernaryTrainer:
         if not is_stochastic:
             checkpoint["latent_fp16"] = True
 
-        # Move all tensors to CPU before saving (torch.save is 8x faster on CPU tensors)
-        def _to_cpu(obj):
-            if isinstance(obj, dict):
-                return {k: _to_cpu(v) for k, v in obj.items()}
-            elif isinstance(obj, torch.Tensor):
-                return obj.cpu()
-            return obj
-
         path = Path(self.config.save_dir) / f"checkpoint_{step:06d}.pt"
-        torch.save(_to_cpu(checkpoint), path)
+        torch.save(checkpoint, path)
         size_mb = path.stat().st_size / 1024 / 1024
         print(f"  [SAVE] Checkpoint saved to {path} ({size_mb:.0f} MB)")
 
