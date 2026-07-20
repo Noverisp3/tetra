@@ -266,6 +266,9 @@ class MultiSourceChunkedDataset(Dataset):
         self.val_start = int(self.total_chunks * (1 - val_split))
         self.n_samples = self.val_start  # train portion
 
+        # Cache np.memmap objects to avoid reopening files per __getitem__
+        self._memmap_cache = {}
+
     def __len__(self):
         return self.n_samples
 
@@ -303,7 +306,10 @@ class MultiSourceChunkedDataset(Dataset):
             idx = idx + (self.total_chunks - self.val_start)
 
         chunk_path, offset = self._get_source_for_index(idx)
-        tokens = np.memmap(str(chunk_path), dtype=np.uint16, mode="r")
+        path_str = str(chunk_path)
+        if path_str not in self._memmap_cache:
+            self._memmap_cache[path_str] = np.memmap(path_str, dtype=np.uint16, mode="r")
+        tokens = self._memmap_cache[path_str]
         x = torch.from_numpy(tokens[offset:offset + self.block_size].astype(np.int64))
         y = torch.from_numpy(tokens[offset + 1:offset + self.block_size + 1].astype(np.int64))
         return x, y
