@@ -76,7 +76,7 @@ def compare(pytorch_model, binary_weights):
     print("\n--- Weight comparison ---")
     max_diff = 0.0
     for name, param in pytorch_model.named_parameters():
-        is_ternary = any(t in name for t in ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
+        is_ternary = any(t in name for t in ["q_proj", "k_proj", "v_proj", "o_proj", "gate_up_proj", "down_proj"])
         if name == "lm_head.weight":
             continue
 

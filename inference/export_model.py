@@ -55,8 +55,8 @@ TERNARY_ENCODING = {-1: 0b00, 0: 0b01, 1: 0b10}
 
 # Which parameters are ternary vs fp32
 TERNARY_PARAM_NAMES = [
-    "q_proj", "k_proj", "v_proj", "o_proj",  # attention
-    "gate_proj", "up_proj", "down_proj",       # ffn
+    "q_proj", "k_proj", "v_proj", "o_proj",   # attention
+    "gate_up_proj", "down_proj",               # ffn
 ]
 
 FP32_PARAM_NAMES = [
@@ -121,7 +121,7 @@ def export_model(model: TernaryTransformerModel, output_path: str):
         hidden_dim = model.hidden_dim
         num_layers = len(model.layers)
         num_heads = model.layers[0].attn.num_heads
-        ffn_dim = model.layers[0].ffn.gate_proj.out_features
+        ffn_dim = model.layers[0].ffn.gate_up_proj.out_features // 2
         max_seq_len = model.max_seq_len
 
         header = struct.pack(

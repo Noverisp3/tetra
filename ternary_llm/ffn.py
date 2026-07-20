@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .layers import TernaryLinear
-from .quantization import FusedTernaryLinear
-
 
 class TernaryFFN(nn.Module):
     """Feed-Forward Network with ternary weights.
@@ -34,19 +32,15 @@ class TernaryFFN(nn.Module):
     ):
         super().__init__()
 
-        # Ternary projections
-        self.gate_proj = TernaryLinear(hidden_dim, ffn_dim, ternary_scale=ternary_scale, per_channel=per_channel)
-        self.up_proj = TernaryLinear(hidden_dim, ffn_dim, ternary_scale=ternary_scale, per_channel=per_channel)
+        # Fused gate+up: single ternary linear with 2*ffn_dim output
+        self.gate_up_proj = TernaryLinear(hidden_dim, 2 * ffn_dim, ternary_scale=ternary_scale, per_channel=per_channel)
         self.down_proj = TernaryLinear(ffn_dim, hidden_dim, ternary_scale=ternary_scale, per_channel=per_channel)
 
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Fused gate+up: concat latent weights → one quantize + one matmul
-        w_fused = torch.cat(
-            [self.gate_proj.latent_weights, self.up_proj.latent_weights], dim=0
-        )
-        fused_out = FusedTernaryLinear.apply(x, w_fused, self.gate_proj.ternary_scale, self.gate_proj.per_channel)
+        # Fused gate+up: one matmul → chunk
+        fused_out = self.gate_up_proj(x)
         gate, up = fused_out.chunk(2, dim=-1)
 
         # SwiGLU activation

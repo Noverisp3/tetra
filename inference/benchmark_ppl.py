@@ -105,7 +105,7 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     ternary_params = sum(
         p.numel() for name, p in model.named_parameters()
-        if any(t in name for t in ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
+        if any(t in name for t in ["q_proj", "k_proj", "v_proj", "o_proj", "gate_up_proj", "down_proj"])
     )
     print(f"Model params: {total_params:,} (ternary: {ternary_params:,})")
 
