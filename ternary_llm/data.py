@@ -189,10 +189,12 @@ def create_dataloaders(tokens, block_size=128, batch_size=8, val_split=0.05, num
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, drop_last=True,
         num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     return train_loader, val_loader
 
@@ -318,11 +320,12 @@ def create_multi_source_dataloaders(data_dir, block_size=128, batch_size=8, val_
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, drop_last=True,
         num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=pin_memory, persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     print(f"Train samples: {len(train_ds):,} | Val samples: {n_val:,}")
-    return train_loader, val_loader
     return train_loader, val_loader
