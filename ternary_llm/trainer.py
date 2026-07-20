@@ -74,6 +74,9 @@ class TrainingConfig:
     # Mode
     mode: str = "ste"  # "ste" or "stochastic"
 
+    # Debug
+    debug: bool = False  # Print MEM/TIME diagnostics
+
     # Stochastic Bit-Flip
     flip_every_n_steps: int = 5  # check threshold & flip bits every N optimizer steps
 
@@ -239,7 +242,8 @@ class TernaryTrainer:
         if self.device.type == "cuda":
             vram_gb = torch.cuda.memory_allocated() / 1024**3
             msg += f" VRAM={vram_gb:.1f}GB"
-        print(msg, flush=True)
+        if self.config.debug:
+            print(msg, flush=True)
 
     def _clear_cache(self):
         """Free cached memory from CUDA allocator; best-effort on DML."""
@@ -313,15 +317,16 @@ class TernaryTrainer:
                 if self.fwd_time > 0:
                     avg_fwd = self.fwd_time / self.micro_steps
                     avg_bwd = self.bwd_time / self.micro_steps
-                    tqdm.write(
-                        f"  [TIME] fwd={avg_fwd:.1f}s | bwd={avg_bwd:.1f}s | total={avg_fwd+avg_bwd:.1f}s"
-                    )
-                    # Per-layer timing (last micro-batch)
-                    if hasattr(self.model, '_layer_times') and self.model._layer_times:
-                        lt = self.model._layer_times
-                        tqdm.write(f"  [TIME] layers: " + " | ".join(
-                            f"L{i}={lt[i]:.3f}s" for i in range(len(lt))
-                        ))
+                    if self.config.debug:
+                        tqdm.write(
+                            f"  [TIME] fwd={avg_fwd:.1f}s | bwd={avg_bwd:.1f}s | total={avg_fwd+avg_bwd:.1f}s"
+                        )
+                        # Per-layer timing (last micro-batch)
+                        if hasattr(self.model, '_layer_times') and self.model._layer_times:
+                            lt = self.model._layer_times
+                            tqdm.write(f"  [TIME] layers: " + " | ".join(
+                                f"L{i}={lt[i]:.3f}s" for i in range(len(lt))
+                            ))
                 self.fwd_time = 0.0
                 self.bwd_time = 0.0
                 self.micro_steps = 0
@@ -351,14 +356,16 @@ class TernaryTrainer:
                 if (self.config.mode == "stochastic"
                     and step > 0
                     and step % self.config.flip_every_n_steps == 0):
-                    tqdm.write(f"  [TIME] opt={opt_time:.1f}s")
+                    if self.config.debug:
+                        tqdm.write(f"  [TIME] opt={opt_time:.1f}s")
                     self.log_mem("before apply_bit_flips")
                     flip_t0 = time.perf_counter()
                     self.model.apply_bit_flips()
                     flip_time = time.perf_counter() - flip_t0
                     self.log_mem("after apply_bit_flips")
-                    tqdm.write(f"  [TIME] flip={flip_time:.1f}s")
-                else:
+                    if self.config.debug:
+                        tqdm.write(f"  [TIME] flip={flip_time:.1f}s")
+                elif self.config.debug:
                     tqdm.write(f"  [TIME] opt={opt_time:.1f}s")
 
                 # LR scheduler
