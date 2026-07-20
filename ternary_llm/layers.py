@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from .quantization import FusedTernaryLinear, TernaryQuantizer, StochasticBitFlipLinear, init_ternary_weight
+from .quantization import FusedTernaryLinear, TernaryQuantizer, StochasticBitFlipLinear, init_ternary_weight, unpack_ternary_tensor
 
 
 class RMSNorm(nn.Module):
@@ -109,8 +109,10 @@ class StochasticTernaryLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.scale = scale
-        # Auto-threshold: threshold * scale = 20 (invariant)
-        self.threshold = 20.0 / scale if threshold is None else threshold
+        # Integer threshold (20). Accumulator adds ±1 per step, threshold=20 means
+        # flip after ~20 gradient steps. This replaces threshold = 20/scale from
+        # the scaled-accumulator approach, avoiding /scale on every backward pass.
+        self.threshold = 20.0 if threshold is None else threshold
 
         # Packed 2-bit ternary weights (4 weights/byte)
         packed = init_ternary_weight(out_features, in_features, sparsity=0.5)
@@ -119,14 +121,22 @@ class StochasticTernaryLinear(nn.Module):
         # Gradient accumulator (FP32)
         self.register_buffer('accumulator', torch.zeros(out_features, in_features))
 
+        # Cached unpacked weights (recomputed after apply_bit_flips)
+        self._w_raw_cache = None
+
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_features))
         else:
             self.register_parameter("bias", None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Cache unpacked weights across steps (avoids 1.2s unpack every step)
+        if self._w_raw_cache is None:
+            self._w_raw_cache = unpack_ternary_tensor(
+                self.packed_weights, (self.out_features, self.in_features)
+            ).to(x.dtype)
         output = StochasticBitFlipLinear.apply(
-            x, self.packed_weights, (self.out_features, self.in_features),
+            x, self.packed_weights, self._w_raw_cache,
             self.scale, self.accumulator, self.threshold
         )
         if self.bias is not None:
@@ -142,10 +152,13 @@ class StochasticTernaryLinear(nn.Module):
             self.threshold, self.scale,
             (self.out_features, self.in_features)
         )
+        # Invalidate cached unpacked weights (packed weights changed)
+        self._w_raw_cache = None
 
     @torch.no_grad()
     def get_ternary_weights(self) -> torch.Tensor:
-        from .quantization import unpack_ternary_tensor
+        if self._w_raw_cache is not None:
+            return self._w_raw_cache
         return unpack_ternary_tensor(self.packed_weights, (self.out_features, self.in_features))
 
     def get_num_bits(self) -> int:

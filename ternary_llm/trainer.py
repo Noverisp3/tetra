@@ -185,6 +185,7 @@ class TernaryTrainer:
                 betas=(config.beta1, config.beta2),
                 eps=config.eps,
                 weight_decay=config.weight_decay,
+                foreach=False,
             )
             print(f"  Hybrid mode: model on {self.device}, optimizer on CPU")
         else:
@@ -195,6 +196,7 @@ class TernaryTrainer:
                 betas=(config.beta1, config.beta2),
                 eps=config.eps,
                 weight_decay=config.weight_decay,
+                foreach=False,
             )
 
         # LR Scheduler

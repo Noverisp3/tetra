@@ -9,20 +9,42 @@ import math, os, sys
 _ternary_ops = None
 
 def _load_cpp_extension():
-    """Try to load C++ ternary_ops extension, return False on failure."""
+    """Try to load C++ ternary_ops extension, return False on failure.
+
+    Tries two approaches:
+      1. Direct import from PyTorch extension cache (no compiler needed)
+      2. Fallback: torch.utils.cpp_extension.load() (requires cl.exe in PATH)
+    """
     global _ternary_ops
     if _ternary_ops is not None:
         return True
+
+    # Approach 1: direct load from PyTorch's extension cache (no compiler check)
+    cache_base = os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                              "torch_extensions", "torch_extensions", "Cache")
+    if os.path.isdir(cache_base):
+        for ver_dir in os.listdir(cache_base):
+            pyd_path = os.path.join(cache_base, ver_dir, "ternary_ops", "ternary_ops.pyd")
+            if os.path.exists(pyd_path):
+                try:
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location("ternary_ops", pyd_path)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    _ternary_ops = mod
+                    return True
+                except Exception:
+                    pass
+
+    # Approach 2: try torch's loader (requires cl.exe in PATH)
+    src = os.path.join(os.path.dirname(__file__), "csrc", "ternary_ops.cpp")
+    if not os.path.exists(src):
+        return False
     try:
         from torch.utils.cpp_extension import load
-        src = os.path.join(os.path.dirname(__file__), "csrc", "ternary_ops.cpp")
-        if not os.path.exists(src):
-            return False
         _ternary_ops = load(
-            name="ternary_ops",
-            sources=[src],
-            extra_cflags=["/arch:AVX2"],
-            verbose=False,
+            name="ternary_ops", sources=[src],
+            extra_cflags=["/arch:AVX2"], verbose=False,
         )
         return True
     except Exception:
@@ -227,15 +249,16 @@ class StochasticBitFlipLinear(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, packed_flat, shape_w, scale, accumulator, threshold):
-        w_raw = unpack_ternary_tensor(packed_flat, shape_w).to(x.dtype)
+    def forward(ctx, x, packed_flat, w_raw, scale, accumulator, threshold):
+        """Forward with pre-unpacked w_raw (cached by module, avoids 1.2s unpack/step).
+
+        w_raw: float tensor of shape (out_features, in_features), values in {-1, 0, +1}.
+        """
         ctx.save_for_backward(x)
         ctx.w_raw = w_raw
-        ctx.packed_flat = packed_flat
         ctx.scale = scale
         ctx.accumulator = accumulator
-        ctx.threshold = threshold
-        return F.linear(x, w_raw * scale)
+        return F.linear(x, w_raw) * scale
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -243,25 +266,21 @@ class StochasticBitFlipLinear(torch.autograd.Function):
         scale = ctx.scale
         in_features = x.size(-1)
 
-        w_ternary = ctx.w_raw * scale
+        # Forward computes: output = F.linear(x, w_raw) * scale
+        # Backward: grad_y_raw = grad_output * scale (2.6M elements vs 500M for w_ternary)
         grad_output_flat = grad_output.reshape(-1, grad_output.size(-1))
-        grad_x_flat = torch.mm(grad_output_flat, w_ternary)
+        grad_y_raw = grad_output_flat * scale
+
+        grad_x_flat = torch.mm(grad_y_raw, ctx.w_raw)
         grad_x = grad_x_flat.view(*x.shape[:-1], in_features)
 
-        grad_w = torch.mm(
-            grad_output_flat.T,
-            x.reshape(-1, x.size(-1))
-        )
+        grad_w = torch.mm(grad_y_raw.T, x.reshape(-1, x.size(-1)))
 
         with torch.no_grad():
             grad_w.sign_().neg_()
-            ctx.accumulator.add_(grad_w / scale)
+            ctx.accumulator.add_(grad_w)
 
-        # Release unpacked weights early to free GPU memory on DML
-        ctx.w_raw = None
-
-        # Free intermediate tensors explicitly for DML allocator
-        del w_ternary, grad_w, grad_output_flat
+        del grad_w, grad_y_raw, grad_output_flat
 
         return grad_x, None, None, None, None, None
 
