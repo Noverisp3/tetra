@@ -11,20 +11,20 @@ class TestTernaryMultiHeadAttention:
     def test_output_shape(self):
         attn = TernaryMultiHeadAttention(hidden_dim=64, num_heads=4)
         x = torch.randn(2, 10, 64)
-        out = attn(x)
+        out, _, _ = attn(x)
         assert out.shape == (2, 10, 64)
 
     def test_causal_mask(self):
         attn = TernaryMultiHeadAttention(hidden_dim=64, num_heads=4)
         x = torch.randn(1, 5, 64)
         mask = torch.tril(torch.ones(5, 5)).unsqueeze(0).unsqueeze(0)
-        out = attn(x, mask=mask)
+        out, _, _ = attn(x, mask=mask)
         assert out.shape == (1, 5, 64)
 
     def test_gradient_flows(self):
         attn = TernaryMultiHeadAttention(hidden_dim=32, num_heads=2)
         x = torch.randn(1, 5, 32, requires_grad=True)
-        out = attn(x)
+        out, _, _ = attn(x)
         loss = out.sum()
         loss.backward()
         assert x.grad is not None
@@ -56,7 +56,7 @@ class TestTernaryTransformerBlock:
             hidden_dim=64, num_heads=4, ffn_dim=256
         )
         x = torch.randn(2, 10, 64)
-        out = block(x)
+        out, _ = block(x)
         assert out.shape == (2, 10, 64)
 
     def test_residual_connection(self):
@@ -64,7 +64,7 @@ class TestTernaryTransformerBlock:
             hidden_dim=32, num_heads=2, ffn_dim=128
         )
         x = torch.randn(1, 5, 32)
-        out = block(x)
+        out, _ = block(x)
         # Output should be different from input (not just identity)
         assert not torch.allclose(x, out, atol=1e-6)
 
@@ -73,7 +73,7 @@ class TestTernaryTransformerBlock:
             hidden_dim=32, num_heads=2, ffn_dim=128
         )
         x = torch.randn(1, 5, 32, requires_grad=True)
-        out = block(x)
+        out, _ = block(x)
         loss = out.sum()
         loss.backward()
         assert x.grad is not None
@@ -91,7 +91,7 @@ class TestTernaryTransformerModel:
             ffn_dim=256,
         )
         input_ids = torch.randint(0, 1000, (2, 10))
-        logits, loss = model(input_ids)
+        logits, loss, _ = model(input_ids)
         assert logits.shape == (2, 10, 1000)
         assert loss is None
 
@@ -105,7 +105,7 @@ class TestTernaryTransformerModel:
         )
         input_ids = torch.randint(0, 1000, (2, 10))
         targets = torch.randint(0, 1000, (2, 10))
-        logits, loss = model(input_ids, targets)
+        logits, loss, _ = model(input_ids, targets)
         assert logits.shape == (2, 10, 1000)
         assert loss is not None
         assert loss.item() > 0
@@ -120,7 +120,7 @@ class TestTernaryTransformerModel:
         )
         input_ids = torch.randint(0, 500, (1, 5))
         targets = torch.randint(0, 500, (1, 5))
-        logits, loss = model(input_ids, targets)
+        logits, loss, _ = model(input_ids, targets)
         loss.backward()
         # Check gradients exist for key parameters
         assert model.token_embedding.weight.grad is not None

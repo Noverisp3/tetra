@@ -56,12 +56,14 @@ class TernaryTransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         # Attention block with residual connection
         residual = x
         x = self.attn_norm(x)
-        x = self.attn(x, mask=mask)
-        x = x + residual
+        past_k, past_v = past_kv if past_kv is not None else (None, None)
+        attn_out, k, v = self.attn(x, mask=mask, past_k=past_k, past_v=past_v)
+        x = attn_out + residual
 
         # FFN block with residual connection
         residual = x
@@ -69,7 +71,7 @@ class TernaryTransformerBlock(nn.Module):
         x = self.ffn(x)
         x = x + residual
 
-        return x
+        return x, (k, v)
 
 
 class TernaryTransformerModel(nn.Module):
@@ -145,29 +147,39 @@ class TernaryTransformerModel(nn.Module):
         input_ids: torch.Tensor,
         targets: torch.Tensor | None = None,
         activation_dtype: torch.dtype | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        past_key_values: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, list[tuple[torch.Tensor, torch.Tensor]] | None]:
         """
         Args:
             input_ids: (batch_size, seq_len) token ids
             targets: (batch_size, seq_len) target token ids for loss
             activation_dtype: cast activations to this dtype (e.g. float16 for AMP)
+            past_key_values: list of (K, V) tuples per layer (for generation KV cache)
 
         Returns:
             logits: (batch_size, seq_len, vocab_size)
             loss: scalar loss if targets provided, else None
+            new_key_values: list of (K, V) tuples per layer (None during training)
         """
         batch_size, seq_len = input_ids.shape
 
         # Embeddings
-        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0)
+        if past_key_values is None:
+            pos_offset = 0
+        else:
+            pos_offset = past_key_values[0][0].size(-2)
+        positions = torch.arange(pos_offset, pos_offset + seq_len, device=input_ids.device).unsqueeze(0)
         x = self.token_embedding(input_ids) + self.pos_embedding(positions)
         if activation_dtype is not None:
             x = x.to(activation_dtype)
         x = self.dropout(x)
 
         # Transformer layers
-        for layer in self.layers:
-            x = layer(x)
+        new_key_values = []
+        for i, layer in enumerate(self.layers):
+            past_kv = past_key_values[i] if past_key_values is not None else None
+            x, kv = layer(x, past_kv=past_kv)
+            new_key_values.append(kv)
 
         # Final norm
         x = self.norm(x)
@@ -186,7 +198,7 @@ class TernaryTransformerModel(nn.Module):
                 ignore_index=-1,
             )
 
-        return logits, loss
+        return logits, loss, new_key_values
 
     @torch.no_grad()
     def generate(
@@ -196,13 +208,17 @@ class TernaryTransformerModel(nn.Module):
         temperature: float = 1.0,
         top_k: int | None = None,
     ) -> torch.Tensor:
-        """Generate text autoregressively."""
-        for _ in range(max_new_tokens):
-            # Crop to max_seq_len if needed
-            idx_cond = input_ids if input_ids.size(1) <= self.max_seq_len else input_ids[:, -self.max_seq_len:]
-
-            # Forward pass
-            logits, _ = self(idx_cond)
+        """Generate text autoregressively with KV cache."""
+        past_key_values = None
+        for step in range(max_new_tokens):
+            if step == 0:
+                # Full prompt forward to build initial cache
+                idx_cond = input_ids if input_ids.size(1) <= self.max_seq_len else input_ids[:, -self.max_seq_len:]
+                logits, _, past_key_values = self(idx_cond, past_key_values=None)
+            else:
+                # Single token forward with KV cache
+                last_token = input_ids[:, -1:]
+                logits, _, past_key_values = self(last_token, past_key_values=past_key_values)
 
             # Get last token logits
             logits = logits[:, -1, :] / temperature

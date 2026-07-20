@@ -48,7 +48,9 @@ class TernaryMultiHeadAttention(nn.Module):
         self,
         x: torch.Tensor,
         mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        past_k: torch.Tensor | None = None,
+        past_v: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size, seq_len, _ = x.shape
 
         # Project to Q, K, V (ternary weights applied internally)
@@ -61,23 +63,30 @@ class TernaryMultiHeadAttention(nn.Module):
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Fused attention: softmax(QK^T/sqrt(d)) @ V — single kernel, no intermediate attn_weights
+        # KV cache
+        if past_k is not None:
+            k = torch.cat([past_k, k], dim=-2)
+            v = torch.cat([past_v, v], dim=-2)
+
+        # Fused attention
         dropout_p = self.attn_dropout.p if self.training else 0.0
+        # When using KV cache, query is single token, attends to all past positions
+        is_causal = (mask is None) and (past_k is None)
         attn_output = F.scaled_dot_product_attention(
             q, k, v,
             dropout_p=dropout_p,
-            is_causal=(mask is None),
+            is_causal=is_causal,
         )
 
         # Reshape and project output
         attn_output = (
             attn_output.transpose(1, 2)
             .contiguous()
-            .view(batch_size, seq_len, self.hidden_dim)
+            .view(batch_size, -1, self.hidden_dim)
         )
         output = self.o_proj(attn_output)
 
-        return output
+        return output, k, v
 
 
 class StochasticMultiHeadAttention(nn.Module):

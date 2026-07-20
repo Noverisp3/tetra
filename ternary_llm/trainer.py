@@ -208,7 +208,7 @@ class TernaryTrainer:
         x = x.to(self.device)
         y = y.to(self.device)
 
-        _, loss = self.model(x, y, activation_dtype=self.activation_dtype)
+        _, loss, _ = self.model(x, y, activation_dtype=self.activation_dtype)
         raw_loss = loss.item()
         loss = loss / self.config.gradient_accumulation_steps
         loss.backward()
@@ -310,7 +310,7 @@ class TernaryTrainer:
             x = x.to(self.device)
             y = y.to(self.device)
 
-            _, loss = self.model(x, y)
+            _, loss, _ = self.model(x, y)
 
             total_loss += loss.item()
             num_batches += 1
