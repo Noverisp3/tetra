@@ -4,6 +4,7 @@ Uses a custom BPE tokenizer trained on TinyStories (not GPT-2/tiktoken).
 Tokenizer is stored in tokenizer/tetra_tokenizer.json.
 """
 import json
+import bisect
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -290,16 +291,12 @@ class MultiSourceChunkedDataset(Dataset):
         src = self.sources[chosen]
         local_idx = global_idx % src["total_blocks"]
 
-        # Find which chunk file this falls into
+        # Find which chunk file this falls into via binary search
         chunk_entries = src["chunks"]
         cum_blocks = src["cum_blocks"]
-        for ci, ce in enumerate(chunk_entries):
-            if local_idx < cum_blocks[ci] + ce["n_blocks"]:
-                offset_in_chunk = (local_idx - cum_blocks[ci]) * self.block_size
-                return ce["path"], offset_in_chunk
-        # Fallback
-        ce = chunk_entries[0]
-        return ce["path"], 0
+        ci = bisect.bisect_right(cum_blocks, local_idx) - 1
+        offset_in_chunk = (local_idx - cum_blocks[ci]) * self.block_size
+        return chunk_entries[ci]["path"], offset_in_chunk
 
     def __getitem__(self, idx):
         if idx >= self.val_start:
