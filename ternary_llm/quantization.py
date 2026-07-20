@@ -166,15 +166,15 @@ def pack_ternary_tensor(w: torch.Tensor) -> torch.Tensor:
     if padded != n:
         flat = torch.nn.functional.pad(flat, (0, padded - n), value=1)
     flat = flat.view(-1, 4)
-    packed = (flat[:, 0] << 6) | (flat[:, 1] << 4) | (flat[:, 2] << 2) | flat[:, 3]
-    return packed.contiguous()
+    packed = flat[:, 0] * 64 + flat[:, 1] * 16 + flat[:, 2] * 4 + flat[:, 3]
+    return packed.contiguous().to(torch.uint8)
 
 
 def unpack_ternary_tensor(packed: torch.Tensor, shape: tuple) -> torch.Tensor:
     """Unpack uint8 tensor → float tensor {-1, 0, +1}."""
-    w0 = ((packed >> 6) & 3).to(torch.int8) - 1
-    w1 = ((packed >> 4) & 3).to(torch.int8) - 1
-    w2 = ((packed >> 2) & 3).to(torch.int8) - 1
+    w0 = (torch.div(packed, 64, rounding_mode='floor') & 3).to(torch.int8) - 1
+    w1 = (torch.div(packed, 16, rounding_mode='floor') & 3).to(torch.int8) - 1
+    w2 = (torch.div(packed, 4, rounding_mode='floor') & 3).to(torch.int8) - 1
     w3 = (packed & 3).to(torch.int8) - 1
     flat = torch.stack([w0, w1, w2, w3], dim=-1).flatten()
     total = 1
