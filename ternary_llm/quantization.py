@@ -3,9 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math, os, sys
 
-# ---------------------------------------------------------------------------
 # Optional C++ SIMD extension for fast pack/unpack
-# ---------------------------------------------------------------------------
 _ternary_ops = None
 
 def _load_cpp_extension():
