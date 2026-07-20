@@ -3,13 +3,6 @@
 Implements:
 - AdamW optimizer with ternary-specific settings
 - Cosine learning rate scheduler with warmup
-
-_HAS_PSUTIL = False
-try:
-    import psutil
-    _HAS_PSUTIL = True
-except ImportError:
-    pass
 - Gradient accumulation
 - Checkpointing and logging
 - Validation loop
@@ -18,6 +11,13 @@ import os
 import json
 import time
 import math
+
+_HAS_PSUTIL = False
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    pass
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
