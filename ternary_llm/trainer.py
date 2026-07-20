@@ -3,6 +3,13 @@
 Implements:
 - AdamW optimizer with ternary-specific settings
 - Cosine learning rate scheduler with warmup
+
+_HAS_PSUTIL = False
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    pass
 - Gradient accumulation
 - Checkpointing and logging
 - Validation loop
@@ -216,16 +223,14 @@ class TernaryTrainer:
         self.log_mem("init")
 
     def log_mem(self, tag: str):
-        try:
-            import psutil
-            ram_gb = psutil.Process().memory_info().rss / 1024**3
-            if self.device.type == "cuda":
-                vram_gb = torch.cuda.memory_allocated() / 1024**3
-                print(f"  [MEM] {tag}: RAM={ram_gb:.1f}GB VRAM={vram_gb:.1f}GB", flush=True)
-            else:
-                print(f"  [MEM] {tag}: RAM={ram_gb:.1f}GB", flush=True)
-        except Exception:
-            pass
+        if not _HAS_PSUTIL:
+            return
+        ram_gb = psutil.Process().memory_info().rss / 1024**3
+        msg = f"  [MEM] {tag}: RAM={ram_gb:.1f}GB"
+        if self.device.type == "cuda":
+            vram_gb = torch.cuda.memory_allocated() / 1024**3
+            msg += f" VRAM={vram_gb:.1f}GB"
+        print(msg, flush=True)
 
     def train_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> float:
         """Single training step with gradient accumulation."""
