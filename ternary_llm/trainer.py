@@ -223,14 +223,14 @@ class TernaryTrainer:
             else:
                 self.device = torch.device(config.device)
         else:
-            # Auto-detect: prefer CPU (faster for ternary models without CUDA)
-            try:
-                import torch_directml
-                self.device = torch_directml.device()
-            except Exception:
-                if torch.cuda.is_available():
-                    self.device = torch.device("cuda")
-                else:
+            # Auto-detect: CUDA > DirectML > CPU
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            else:
+                try:
+                    import torch_directml
+                    self.device = torch_directml.device()
+                except Exception:
                     self.device = torch.device("cpu")
         print(f"  Device: {self.device}")
 
@@ -289,6 +289,7 @@ class TernaryTrainer:
 
         # Mixed precision: auto-select best dtype for device
         self.activation_dtype = None
+        self.scaler = None
         if config.dtype in ("float16", "bfloat16") and self.device != torch.device("cpu"):
             bf16_ok = self.device.type == "cuda" and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
             if config.dtype == "bfloat16" and bf16_ok:
@@ -299,6 +300,9 @@ class TernaryTrainer:
             else:
                 self.activation_dtype = torch.float16
             print(f"  {str(self.activation_dtype).split('.')[-1]} activations enabled")
+        # GradScaler prevents float16 underflow on CUDA
+        if self.device.type == "cuda" and self.activation_dtype == torch.float16:
+            self.scaler = torch.cuda.amp.GradScaler()
 
         # Create save directory
         Path(config.save_dir).mkdir(parents=True, exist_ok=True)
@@ -337,11 +341,18 @@ class TernaryTrainer:
         y = y.to(self.device)
 
         t0 = time.perf_counter()
-        _, loss, _ = self.model(x, y, activation_dtype=self.activation_dtype)
+        if self.scaler is not None:
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                _, loss, _ = self.model(x, y, activation_dtype=self.activation_dtype)
+        else:
+            _, loss, _ = self.model(x, y, activation_dtype=self.activation_dtype)
         t1 = time.perf_counter()
         raw_loss = loss.item()
         loss = loss / self.config.gradient_accumulation_steps
-        loss.backward()
+        if self.scaler is not None:
+            self.scaler.scale(loss).backward()
+        else:
+            loss.backward()
         t2 = time.perf_counter()
         self._clear_cache()
 
@@ -410,6 +421,8 @@ class TernaryTrainer:
 
                 # Gradient clipping (unique params only)
                 opt_t0 = time.perf_counter()
+                if self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(
                     self._unique_params(), self.config.grad_clip
                 )
@@ -417,10 +430,18 @@ class TernaryTrainer:
                 # Optimizer step
                 if self.hybrid:
                     self._hybrid_sync_gradients()
-                    self.optimizer.step()
+                    if self.scaler is not None:
+                        self.scaler.step(self.optimizer)
+                    else:
+                        self.optimizer.step()
                     self._hybrid_sync_weights()
                 else:
-                    self.optimizer.step()
+                    if self.scaler is not None:
+                        self.scaler.step(self.optimizer)
+                    else:
+                        self.optimizer.step()
+                if self.scaler is not None:
+                    self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
                 if self.hybrid:
                     self.model.zero_grad(set_to_none=True)

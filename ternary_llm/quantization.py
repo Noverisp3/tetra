@@ -26,12 +26,10 @@ def _try_load_from_cache(name):
     return None
 
 def _load_cpp_extension():
-    """Load C++ ternary_ops extension with CPU-capability dispatch.
+    """Load C++ ternary_ops extension.
 
-    Tries (in order):
-      1. AVX-512: direct cache load or torch.load for ternary_ops_avx512
-      2. AVX2:    direct cache load or torch.load for ternary_ops (baseline)
-      3. Returns False if neither works
+    Tries AVX-512 then AVX2 with platform-appropriate compiler flags.
+    Returns False if no compiler available (e.g. Colab without build tools).
     """
     global _ternary_ops
     if _ternary_ops is not None:
@@ -39,17 +37,30 @@ def _load_cpp_extension():
 
     csrc = os.path.join(os.path.dirname(__file__), "csrc")
 
-    # Attempt 1: AVX-512 variant (best perf)
-    # Check CPU for AVX-512 support via Windows API
+    # Platform-appropriate SIMD flags
+    if sys.platform == "win32":
+        avx512_flag = "/arch:AVX512"
+        avx2_flag = "/arch:AVX2"
+    else:
+        avx512_flag = "-mavx512f -mavx512bw"
+        avx2_flag = "-mavx2"
+
     def _has_avx512():
         try:
-            if sys.platform == 'win32':
+            if sys.platform == "win32":
                 import ctypes
                 return ctypes.windll.kernel32.IsProcessorFeaturePresent(0x17) != 0
+            else:
+                import subprocess
+                out = subprocess.run(
+                    ["grep", "avx512", "/proc/cpuinfo"],
+                    capture_output=True, text=True
+                )
+                return bool(out.stdout.strip())
         except Exception:
-            pass
-        return False
+            return False
 
+    # Attempt 1: AVX-512 variant
     if _has_avx512():
         mod = _try_load_from_cache("ternary_ops_avx512")
         if mod is not None:
@@ -61,13 +72,13 @@ def _load_cpp_extension():
                 from torch.utils.cpp_extension import load
                 _ternary_ops = load(
                     name="ternary_ops_avx512", sources=[avx512_src],
-                    extra_cflags=["/arch:AVX512"], verbose=False,
+                    extra_cflags=[avx512_flag], verbose=False,
                 )
                 return True
             except Exception:
                 pass
 
-    # Attempt 2: AVX2 variant (fallback)
+    # Attempt 2: AVX2 variant (portable fallback)
     mod = _try_load_from_cache("ternary_ops")
     if mod is not None:
         _ternary_ops = mod
@@ -79,7 +90,7 @@ def _load_cpp_extension():
         from torch.utils.cpp_extension import load
         _ternary_ops = load(
             name="ternary_ops", sources=[avx2_src],
-            extra_cflags=["/arch:AVX2"], verbose=False,
+            extra_cflags=[avx2_flag], verbose=False,
         )
         return True
     except Exception:

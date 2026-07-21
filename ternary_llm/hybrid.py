@@ -115,6 +115,8 @@ class HybridTransformerModel(nn.Module):
         B, T = input_ids.shape
         pos = torch.arange(T, device=input_ids.device).unsqueeze(0)
         x = self.token_embedding(input_ids) + self.pos_embedding(pos)
+        if activation_dtype is not None:
+            x = x.to(activation_dtype)
         x = self.dropout(x)
 
         for layer in self.layers:
@@ -122,6 +124,8 @@ class HybridTransformerModel(nn.Module):
 
         x = self.norm(x)
         logits = self.lm_head(x)
+        if activation_dtype is not None:
+            logits = logits.float()
         loss = None
         if targets is not None:
             loss = F.cross_entropy(
