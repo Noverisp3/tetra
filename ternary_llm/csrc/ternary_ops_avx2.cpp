@@ -271,6 +271,72 @@ int64_t apply_bit_flips(at::Tensor packed_weights, at::Tensor accumulator,
     return flips;
 }
 
+// INT8 ternary matmul: int8 activations × packed ternary weights → float32 output
+// Pure integer in forward: conditional add/sub, int32 accumulation, final float scale
+// Returns float32 for seamless integration with float norms/attention
+
+at::Tensor ternary_matmul_int8(at::Tensor x_int8, at::Tensor packed_weights,
+                                int64_t out_features, int64_t in_features) {
+    TORCH_CHECK(x_int8.dtype() == torch::kInt8, "x_int8 must be int8");
+    TORCH_CHECK(packed_weights.dtype() == torch::kUInt8,
+                "packed_weights must be uint8");
+    TORCH_CHECK(x_int8.is_contiguous(), "x_int8 must be contiguous");
+    TORCH_CHECK(packed_weights.is_contiguous(), "packed_weights must be contiguous");
+
+    auto sizes = x_int8.sizes();
+    TORCH_CHECK(sizes.size() == 3 || sizes.size() == 2, "x_int8 must be 2D or 3D");
+    int64_t batch = (sizes.size() == 3) ? sizes[0] : 1;
+    int64_t seq = (sizes.size() == 3) ? sizes[1] : sizes[0];
+    int64_t tokens = batch * seq;
+
+    const auto* x_data = x_int8.data_ptr<int8_t>();
+    const auto* w = packed_weights.data_ptr<uint8_t>();
+
+    auto result = torch::empty({batch, seq, out_features}, torch::kFloat32);
+    auto* out = result.data_ptr<float>();
+
+    for (int64_t t = 0; t < tokens; t++) {
+        const int8_t* x_row = x_data + t * in_features;
+        float* out_row = out + t * out_features;
+
+        for (int64_t of = 0; of < out_features; of++) {
+            const uint8_t* w_row = w + of * in_features / 4;
+            int32_t acc = 0;
+
+            int64_t if_ = 0;
+            for (; if_ + 3 < in_features; if_ += 4) {
+                uint8_t byte = w_row[if_ / 4];
+                // 00=-1, 01=0, 10=1, 11=0
+                int v0 = (int)((byte >> 6) & 3) - 1;
+                int v1 = (int)((byte >> 4) & 3) - 1;
+                int v2 = (int)((byte >> 2) & 3) - 1;
+                int v3 = (int)(byte & 3) - 1;
+                if (v0 == 1)      acc += (int32_t)x_row[if_];
+                else if (v0 == -1) acc -= (int32_t)x_row[if_];
+                if (v1 == 1)      acc += (int32_t)x_row[if_+1];
+                else if (v1 == -1) acc -= (int32_t)x_row[if_+1];
+                if (v2 == 1)      acc += (int32_t)x_row[if_+2];
+                else if (v2 == -1) acc -= (int32_t)x_row[if_+2];
+                if (v3 == 1)      acc += (int32_t)x_row[if_+3];
+                else if (v3 == -1) acc -= (int32_t)x_row[if_+3];
+            }
+
+            // Scalar remainder
+            for (; if_ < in_features; if_++) {
+                int byte_idx = (of * in_features + if_) / 4;
+                int shift = 6 - 2 * ((of * in_features + if_) % 4);
+                int code = (w[byte_idx] >> shift) & 3;
+                if (code == 2)       acc += (int32_t)x_row[if_];
+                else if (code == 0)  acc -= (int32_t)x_row[if_];
+            }
+
+            out_row[of] = (float)acc;
+        }
+    }
+
+    return result;
+}
+
 // PyTorch bindings
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -283,4 +349,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Fused backward: compute grad_x + accumulate sign(-grad_w)/scale");
     m.def("apply_bit_flips", &apply_bit_flips,
           "Check accumulators and flip bits where threshold exceeded");
+    m.def("ternary_matmul_int8", &ternary_matmul_int8,
+          "INT8 ternary matmul: int8 activations × packed ternary → int32 accum → float");
 }

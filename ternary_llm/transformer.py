@@ -248,14 +248,14 @@ class TernaryTransformerModel(nn.Module):
 class StochasticTransformerBlock(nn.Module):
     """Transformer block with Stochastic Bit-Flip layers."""
 
-    def __init__(self, hidden_dim, num_heads, ffn_dim, dropout=0.0, scale=1.0, threshold=None):
+    def __init__(self, hidden_dim, num_heads, ffn_dim, dropout=0.0, scale=1.0, threshold=None, int8=False):
         super().__init__()
         from .attention import StochasticMultiHeadAttention
         from .ffn import StochasticFFN
         self.attn_norm = RMSNorm(hidden_dim)
-        self.attn = StochasticMultiHeadAttention(hidden_dim, num_heads, dropout, scale, threshold)
+        self.attn = StochasticMultiHeadAttention(hidden_dim, num_heads, dropout, scale, threshold, int8=int8)
         self.ffn_norm = RMSNorm(hidden_dim)
-        self.ffn = StochasticFFN(hidden_dim, ffn_dim, dropout, scale, threshold)
+        self.ffn = StochasticFFN(hidden_dim, ffn_dim, dropout, scale, threshold, int8=int8)
 
     def forward(self, x, mask=None):
         r = x
@@ -282,14 +282,14 @@ class StochasticTransformerModel(nn.Module):
     """
 
     def __init__(self, vocab_size, hidden_dim, num_layers, num_heads, ffn_dim,
-                 max_seq_len=2048, dropout=0.0, scale=1.0, threshold=None):
+                 max_seq_len=2048, dropout=0.0, scale=1.0, threshold=None, int8=False):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.max_seq_len = max_seq_len
         self.token_embedding = nn.Embedding(vocab_size, hidden_dim)
         self.pos_embedding = nn.Embedding(max_seq_len, hidden_dim)
         self.layers = nn.ModuleList([
-            StochasticTransformerBlock(hidden_dim, num_heads, ffn_dim, dropout, scale, threshold)
+            StochasticTransformerBlock(hidden_dim, num_heads, ffn_dim, dropout, scale, threshold, int8=int8)
             for _ in range(num_layers)
         ])
         self.norm = RMSNorm(hidden_dim)

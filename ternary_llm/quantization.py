@@ -273,7 +273,18 @@ def init_ternary_weight(out_features: int, in_features: int, sparsity: float = 0
     return packed.contiguous()
 
 
-# Stochastic Bit-Flip Autograd
+# INT8 Autograd Helper
+
+class Int8QuantizeSTE(torch.autograd.Function):
+    """Quantize float → int8 with Straight-Through Estimator for backward."""
+    @staticmethod
+    def forward(ctx, x, scale_x):
+        ctx.scale_x = scale_x
+        return (x / scale_x).round().clamp(-128, 127).to(torch.int8)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.float(), None
 
 class StochasticBitFlipLinear(torch.autograd.Function):
     """Stochastic Bit-Flip for ternary weights.
@@ -316,6 +327,58 @@ class StochasticBitFlipLinear(torch.autograd.Function):
             ctx.accumulator.add_(grad_w)
 
         del grad_w, grad_y_raw, grad_output_flat
+
+        return grad_x, None, None, None, None, None
+
+
+class Int8StochasticBitFlipLinear(torch.autograd.Function):
+    """Stochastic Bit-Flip with INT8 activations.
+
+    Forward: quantize x → int8, int8 ternary matmul → float32, dequantize.
+    Backward: STE — grad flows through float matmul for values, int8 matmul
+              provides the actual output values.
+    """
+
+    @staticmethod
+    def forward(ctx, x, packed_w, w_raw, scale, accumulator, threshold):
+        max_abs = x.abs().max()
+        scale_x = max_abs / 127.0 if max_abs > 1e-10 else 1.0
+        x_q = (x / scale_x).round().clamp(-128, 127).to(torch.int8)
+
+        ctx.save_for_backward(x.float())
+        ctx.w_raw = w_raw
+        ctx.scale = scale
+        ctx.accumulator = accumulator
+        ctx.scale_x = scale_x
+
+        # Grad carrier: float matmul so grad flows through x
+        out = F.linear(x.float(), w_raw.float()) * scale * scale_x
+
+        # Replace values with int8 matmul result (no grad contribution)
+        with torch.no_grad():
+            int_out = _ternary_ops.ternary_matmul_int8(
+                x_q.contiguous(), packed_w.contiguous(),
+                w_raw.size(0), w_raw.size(1),
+            )
+        out.data = int_out.float() * scale * scale_x
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x = ctx.saved_tensors[0]
+        scale = ctx.scale
+        in_features = x.size(-1)
+
+        grad_output_flat = grad_output.reshape(-1, grad_output.size(-1))
+        grad_y_raw = grad_output_flat * scale
+
+        grad_x_flat = torch.mm(grad_y_raw, ctx.w_raw)
+        grad_x = grad_x_flat.view(*x.shape[:-1], in_features)
+
+        grad_w = torch.mm(grad_y_raw.T, x.reshape(-1, x.size(-1)))
+        with torch.no_grad():
+            grad_w.sign_().neg_()
+            ctx.accumulator.add_(grad_w)
 
         return grad_x, None, None, None, None, None
 

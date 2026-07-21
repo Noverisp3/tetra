@@ -61,6 +61,8 @@ def main():
                         help="[STE] Per-channel quantization threshold (instead of per-tensor)")
     parser.add_argument("--threshold", type=float, default=None,
                         help="[Stochastic] Bit-flip threshold (default: 20.0 / scale, auto-computed)")
+    parser.add_argument("--int8", action="store_true",
+                        help="[Stochastic] Use INT8 forward matmul (quantize activations to int8)")
     parser.add_argument("--flip-every-n-steps", type=int, default=5,
                         help="[Stochastic] Check threshold & flip bits every N optimizer steps (default: 5)")
     parser.add_argument("--debug", action="store_true",
@@ -169,6 +171,7 @@ def main():
             max_seq_len=config.max_seq_len,
             scale=config.ternary_scale,
             threshold=args.threshold,
+            int8=args.int8,
         )
     else:
         model = TernaryTransformerModel(

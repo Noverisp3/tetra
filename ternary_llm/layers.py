@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from .quantization import FusedTernaryLinear, TernaryQuantizer, StochasticBitFlipLinear, init_ternary_weight, unpack_ternary_tensor
+from .quantization import FusedTernaryLinear, TernaryQuantizer, StochasticBitFlipLinear, Int8StochasticBitFlipLinear, init_ternary_weight, unpack_ternary_tensor, _ternary_ops
 
 
 class RMSNorm(nn.Module):
@@ -104,11 +104,13 @@ class StochasticTernaryLinear(nn.Module):
         bias: bool = False,
         scale: float = 1.0,
         threshold: float | None = None,
+        int8: bool = False,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.scale = scale
+        self.int8 = int8
         # Integer threshold (20). Accumulator adds ±1 per step, threshold=20 means
         # flip after ~20 gradient steps. This replaces threshold = 20/scale from
         # the scaled-accumulator approach, avoiding /scale on every backward pass.
@@ -130,15 +132,22 @@ class StochasticTernaryLinear(nn.Module):
             self.register_parameter("bias", None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Cache unpacked weights across steps (avoids 1.2s unpack every step)
         if self._w_raw_cache is None:
             self._w_raw_cache = unpack_ternary_tensor(
                 self.packed_weights, (self.out_features, self.in_features)
             ).to(x.dtype)
-        output = StochasticBitFlipLinear.apply(
-            x, self.packed_weights, self._w_raw_cache,
-            self.scale, self.accumulator, self.threshold
-        )
+
+        if self.int8 and _ternary_ops is not None:
+            output = Int8StochasticBitFlipLinear.apply(
+                x, self.packed_weights, self._w_raw_cache,
+                self.scale, self.accumulator, self.threshold
+            )
+        else:
+            output = StochasticBitFlipLinear.apply(
+                x, self.packed_weights, self._w_raw_cache,
+                self.scale, self.accumulator, self.threshold
+            )
+
         if self.bias is not None:
             output = output + self.bias
         return output

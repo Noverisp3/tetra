@@ -233,8 +233,8 @@ ternary_llm/
   int8.py                 # INT8 fake-quantization (reference, not used in model)
   __init__.py
   csrc/
-    ternary_ops_avx2.cpp      # C++ SIMD pack/unpack/matmul (AVX2)
-    ternary_ops_avx512.cpp    # C++ SIMD pack/unpack/matmul (AVX-512)
+    ternary_ops_avx2.cpp   # C++ SIMD pack/unpack/matmul (AVX2)
+    ternary_ops_avx512.cpp# C++ SIMD pack/unpack/matmul (AVX-512)
     setup.py              # PyTorch extension build
     __init__.py
 
