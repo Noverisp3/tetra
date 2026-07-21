@@ -172,3 +172,29 @@ class StochasticTernaryLinear(nn.Module):
 
     def get_num_bits(self) -> int:
         return self.out_features * self.in_features * 2  # 2 bits per weight
+
+
+class TopKActivation(nn.Module):
+    """Keep top-k% activations, zero the rest. STE backward.
+
+    Forward: mask = score > threshold_of_top_k, output = input * mask
+    Backward: grad flows to all positions (allows recovery).
+    """
+
+    def __init__(self, keep_ratio: float = 0.2):
+        super().__init__()
+        self.keep_ratio = keep_ratio
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.keep_ratio >= 1.0 or not self.training:
+            return x
+        x_f = x.float()
+        k = max(1, int(x_f.size(-1) * self.keep_ratio))
+        # threshold: (..., 1) via take top-kth value along last dim
+        vals = x_f.abs().topk(k, dim=-1).values
+        threshold = vals[..., -1:]  # (..., 1), the k-th largest absolute value
+        mask = (x_f.abs() >= threshold).to(x.dtype)
+        return x * mask
+
+    def extra_repr(self) -> str:
+        return f"keep_ratio={self.keep_ratio}"

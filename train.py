@@ -63,6 +63,8 @@ def main():
                         help="[Stochastic] Bit-flip threshold (default: 20.0 / scale, auto-computed)")
     parser.add_argument("--int8", action="store_true",
                         help="[Stochastic] Use INT8 forward matmul (quantize activations to int8)")
+    parser.add_argument("--topk", type=float, default=None,
+                        help="Keep top-k fraction of activations after norm (e.g. 0.2 = 20%%, default: 1.0 = off)")
     parser.add_argument("--flip-every-n-steps", type=int, default=5,
                         help="[Stochastic] Check threshold & flip bits every N optimizer steps (default: 5)")
     parser.add_argument("--debug", action="store_true",
@@ -172,6 +174,7 @@ def main():
             scale=config.ternary_scale,
             threshold=args.threshold,
             int8=args.int8,
+            topk=args.topk if args.topk is not None else 1.0,
         )
     else:
         model = TernaryTransformerModel(
@@ -183,6 +186,7 @@ def main():
             max_seq_len=config.max_seq_len,
             ternary_scale=config.ternary_scale,
             per_channel=config.per_channel,
+            topk=args.topk if args.topk is not None else 1.0,
         )
 
     total_params = sum(p.numel() for p in model.parameters())
