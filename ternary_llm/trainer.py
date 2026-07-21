@@ -287,22 +287,27 @@ class TernaryTrainer:
             min_lr=config.min_lr,
         )
 
-        # Mixed precision: auto-select best dtype for device
-        self.activation_dtype = None
+        # Mixed precision
+        self.activation_dtype = None  # explicit dtype override (for DML/CPU)
+        self.autocast_dtype = None    # autocast dtype (for CUDA)
         self.scaler = None
-        if config.dtype in ("float16", "bfloat16") and self.device != torch.device("cpu"):
-            bf16_ok = self.device.type == "cuda" and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
-            if config.dtype == "bfloat16" and bf16_ok:
-                self.activation_dtype = torch.bfloat16
-            elif config.dtype == "bfloat16":
-                print("  bfloat16 not supported on this device, falling back to float16")
-                self.activation_dtype = torch.float16
+        if self.device.type == "cuda":
+            if config.dtype in ("float16", "bfloat16"):
+                bf16_ok = config.dtype == "bfloat16" and getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+                self.autocast_dtype = torch.bfloat16 if bf16_ok else torch.float16
+                if self.autocast_dtype == torch.float16:
+                    self.scaler = torch.amp.GradScaler("cuda")
+                print(f"  CUDA autocast: {str(self.autocast_dtype).split('.')[-1]}")
             else:
+                print(f"  CUDA: float32 (no autocast)")
+        else:
+            # DML or CPU: explicit casting (autocast not available)
+            if config.dtype == "bfloat16":
+                print("  DML/CPU: bfloat16 not supported, using float32")
+                config.dtype = "float32"
+            if config.dtype == "float16":
                 self.activation_dtype = torch.float16
-            print(f"  {str(self.activation_dtype).split('.')[-1]} activations enabled")
-        # GradScaler prevents float16 underflow on CUDA
-        if self.device.type == "cuda" and self.activation_dtype == torch.float16:
-            self.scaler = torch.cuda.amp.GradScaler()
+                print("  float16 activations (explicit cast)")
 
         # Create save directory
         Path(config.save_dir).mkdir(parents=True, exist_ok=True)
@@ -341,8 +346,8 @@ class TernaryTrainer:
         y = y.to(self.device)
 
         t0 = time.perf_counter()
-        if self.scaler is not None:
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+        if self.autocast_dtype is not None:
+            with torch.amp.autocast(device_type="cuda", dtype=self.autocast_dtype):
                 _, loss, _ = self.model(x, y, activation_dtype=self.activation_dtype)
         else:
             _, loss, _ = self.model(x, y, activation_dtype=self.activation_dtype)
