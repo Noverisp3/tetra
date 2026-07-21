@@ -109,7 +109,7 @@ class DMLAdamW(torch.optim.Optimizer):
 class TrainingConfig:
     """Training configuration for Ternary LLM."""
     # Model (overridden by data pipeline from tokenizer metadata)
-    vocab_size: int = 8192  # custom BPE tokenizer
+    vocab_size: int = 50257  # GPT-2 tokenizer (default)
     hidden_dim: int = 128
     num_layers: int = 4
     num_heads: int = 4

@@ -18,28 +18,42 @@ _tokenizer_cache = None
 
 
 def get_tokenizer(tokenizer_dir="tokenizer"):
-    """Load the custom BPE tokenizer from disk (cached)."""
+    """Load tokenizer: GPT-2 (transformers) > custom BPE (tokenizers).
+
+    Uses HuggingFace GPT-2 tokenizer if transformers is installed.
+    Falls back to custom tetra_tokenizer.json.
+    """
     global _tokenizer_cache
     if _tokenizer_cache is not None:
         return _tokenizer_cache
 
-    from tokenizers import Tokenizer
+    # Try GPT-2 tokenizer via transformers (preferred)
+    try:
+        from transformers import GPT2Tokenizer
+        tok = GPT2Tokenizer.from_pretrained("gpt2")
+        _tokenizer_cache = tok
+        return tok
+    except ImportError:
+        pass
+    except Exception:
+        pass
 
+    # Fallback: custom BPE tokenizer
+    from tokenizers import Tokenizer
     tok_path = Path(tokenizer_dir) / "tetra_tokenizer.json"
     if not tok_path.exists():
         raise FileNotFoundError(
             f"Tokenizer not found at {tok_path}.\n"
             f"Run: python train_tokenizer.py"
         )
-
     _tokenizer_cache = Tokenizer.from_file(str(tok_path))
     return _tokenizer_cache
 
 
 class TokenizerWrapper:
-    """Compatibility wrapper for the HuggingFace tokenizers library.
+    """Compatibility wrapper for tokenizers (both HuggingFace tokenizers & transformers).
 
-    Provides the same interface we used with tiktoken:
+    Provides unified interface:
         enc.encode(text) -> list[int]
         enc.decode(ids) -> str
         enc.eot_token -> int (eos_id)
@@ -47,15 +61,23 @@ class TokenizerWrapper:
     """
     def __init__(self, tokenizer):
         self._tok = tokenizer
-        vocab = tokenizer.get_vocab()
-        self.eot_token = vocab.get("<EOS>", vocab.get("<eos>", 2))
-        self.n_vocab = tokenizer.get_vocab_size()
+        # Detect tokenizer type
+        if hasattr(tokenizer, "eos_token_id"):
+            # transformers.PreTrainedTokenizer
+            self._is_transformers = True
+            self.eot_token = tokenizer.eos_token_id
+            self.n_vocab = tokenizer.vocab_size
+        else:
+            # tokenizers.Tokenizer
+            self._is_transformers = False
+            vocab = tokenizer.get_vocab()
+            self.eot_token = vocab.get("<EOS>", vocab.get("<eos>", 2))
+            self.n_vocab = tokenizer.get_vocab_size()
 
     def encode(self, text):
-        """Encode text, returning list of token IDs (no special tokens)."""
-        # Disable post_processor (BOS/EOS) for raw encode
+        if self._is_transformers:
+            return self._tok.encode(text)
         ids = self._tok.encode(text).ids
-        # Remove BOS/EOS if post_processor added them
         if ids and ids[0] == self._tok.token_to_id("<BOS>"):
             ids = ids[1:]
         if ids and ids[-1] == self._tok.token_to_id("<EOS>"):
@@ -63,19 +85,19 @@ class TokenizerWrapper:
         return ids
 
     def encode_ordinary(self, text):
-        """Alias for encode() -- matches tiktoken API."""
         return self.encode(text)
 
     def decode(self, ids):
-        """Decode token IDs to string."""
         return self._tok.decode(ids)
 
     def token_to_id(self, token):
+        if self._is_transformers:
+            return self._tok.convert_tokens_to_ids(token)
         return self._tok.token_to_id(token)
 
 
 def get_tokenizer_compat(tokenizer_dir="tokenizer"):
-    """Return a TokenizerWrapper for backward-compatible API."""
+    """Return a TokenizerWrapper for unified tokenizer API."""
     raw = get_tokenizer(tokenizer_dir)
     return TokenizerWrapper(raw)
 
