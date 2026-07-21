@@ -1,22 +1,27 @@
 # Tetra — Pure Ternary LLM
 
-**Tetra** is a decoder-only transformer trained entirely with **ternary weights** ({-1, 0, +1}). Two training modes:
+**Tetra** is a decoder-only transformer trained entirely with **ternary weights** ({-1, 0, +1}). Three training modes:
 
 - **STE** (Straight-Through Estimator) — FP32 latent shadow weights quantized on-the-fly via absmean, gradient flows through STE. (BitNet b1.58 approach)
 - **Stochastic Bit-Flip** — no latent weights. Weights stored as packed 2-bit ternary. Gradient sign accumulated in FP32 accumulator; weight flips when |accumulator| > threshold.
+- **Hybrid SSM-Attention** — 80% Ternary SSM (Mamba-style) + 20% Ternary Attention layers. SSM scan via vectorized parallel prefix (O(T), no Python loop).
 
 ## Architecture
 
-BitNet b1.58-style transformer decoder:
+Base BitNet b1.58-style transformer, optionally hybridized:
 
-| Component | Detail |
-|-----------|--------|
-| **Weights** | {-1, 0, +1} via absmean quantization; no FP32 latent in stochastic mode |
-| **Embedding** | Token embedding **tied** with LM head; RoPE applied to queries/keys |
-| **Attention** | Causal multi-head with KV cache; ternary Q/K/V/O projections |
-| **FFN** | SwiGLU variant: fused gate+up projection into one ternary matmul (2× FFN dim) |
-| **Normalization** | Pre-norm RMSNorm (FP32, not quantized) |
-| **Tokenizer** | Custom BPE, vocab=8192, PAD=0 / BOS=1 / EOS=2 / UNK=3 |
+| Component | STE / Stochastic | Hybrid |
+|-----------|-----------------|--------|
+| **Weights** | {-1, 0, +1} via absmean (STE) or packed 2-bit (Stochastic) | Same per-layer |
+| **Attention** | Causal multi-head, KV cache, ternary Q/K/V/O projections | 20% of layers |
+| **SSM Block** | — | 80% of layers: RMSNorm → TernaryLinear(expand 2×) → depthwise Conv1d → SiLU → parallel-prefix SSM scan → gate → TernaryLinear(project back) |
+| **FFN** | SwiGLU: fused gate+up into one ternary matmul (2× FFN dim) | Same |
+| **Sparsification** | Optional `--topk RATIO`: keep top-k% activations after norm, zero rest (STE backward) | Same |
+| **INT8 Forward** | Optional `--int8`: quantize activations → int8 before matmul (QAT effect) | Same |
+| **Normalization** | Pre-norm RMSNorm (FP32, not quantized) | Same |
+| **Tokenizer** | Custom BPE, vocab=8192, PAD=0 / BOS=1 / EOS=2 / UNK=3 | Same |
+
+The SSM recurrence uses a vectorized parallel prefix scan (`decay^t · cumsum(Δ·x / decay^j)`) instead of a Python loop, with decay clamped to [0.98, 0.9999] for float32 stability on long sequences.
 
 ### Mixed Precision
 
@@ -72,14 +77,17 @@ Lower threshold → too much flipping (diverges). Higher → not enough learning
 
 Batch=4, Seq=1024 (except 500m CPU: batch=2, seq=512). DML = Intel Iris Xe via DirectML. CPU = same hardware, MKL.
 
-| Preset | Device | Params | Fwd | Bwd | Total/step | RAM | Est. 10K steps |
-|--------|--------|--------|-----|-----|-----------|-----|-----------------|
-| **tiny** | DML | 2.2M | 0.13s | 0.53s | 0.66s | — | 1.8h |
-| **medium** | DML | 55M | 1.64s | 3.24s | 4.88s | — | 13.6h |
-| **medium** | CPU | 55M | 0.47s | 2.36s | 2.83s | ~1GB | 7.9h |
-| **large** | DML | 92M | 2.40s | 4.59s | 6.99s | — | 19.4h |
-| **500m** | DML | 516M | ~10s | ~25s | ~35s | OOM step 2 | — |
-| **500m** | CPU | 516M | 7.5s | 17.1s | 24.5s | 2.8GB | 68h |
+| Preset | Device | Mode | Params | Total/step | RAM | Est. 10K steps |
+|--------|--------|------|--------|-----------|-----|-----------------|
+| **tiny** | DML | Stochastic | 1.1M | 1.3s | — | 3.6h |
+| **tiny** | DML | Hybrid | 1.1M | 1.0s | — | 2.8h |
+| **tiny** | DML | Hybrid + TopK 0.2 | 1.1M | 1.0s | — | 2.8h |
+| **tiny** | DML | STE | 2.2M | 1.3s | — | 3.6h |
+| **medium** | DML | Stochastic | 55M | 4.9s | — | 13.6h |
+| **medium** | CPU | Stochastic | 55M | 2.8s | ~1GB | 7.9h |
+| **large** | DML | Stochastic | 92M | 7.0s | — | 19.4h |
+| **500m** | DML | Stochastic | 516M | ~35s | OOM step 2 | — |
+| **500m** | CPU | Stochastic | 516M | 24.5s | 2.8GB | 68h |
 
 CPU avoids DML OOM on 16GB shared VRAM. C++ SIMD pack/unpack (~5s for 500M weights) accelerates unpack on CPU. Bottleneck is matmul (77% of time) on Iris Xe 4-core CPU with MKL. `torch.compile` and `torch.amp.autocast` are not supported on DirectML.
 
@@ -96,8 +104,9 @@ python build_cpp.py
 | pack_ternary | ~6s | 3.7s |
 | unpack_ternary | ~6s | 1.2s |
 | ternary_matmul (CPU) | — | 7s (512×2048, AVX2) |
+| ternary_matmul_int8 (CPU) | — | pure int add/sub (512×2048, scalar) |
 
-Includes fused stochastic backward (grad_x + accumulator update in one pass). See `ternary_llm/csrc/ternary_ops_avx2.cpp`.
+Includes fused stochastic backward (grad_x + accumulator update in one pass) and `ternary_matmul_int8` for INT8+ternary matmul (int8 activation × packed ternary). See `ternary_llm/csrc/ternary_ops_avx2.cpp`.
 
 ### Hardware Insight: Why Float SIMD beats LUT on x86 AVX-512
 
@@ -120,6 +129,12 @@ python train.py --preset tiny --steps 1000
 # Stochastic Bit-Flip
 python train.py --mode stochastic --preset medium --steps 5000
 
+# Hybrid SSM-Attention (80% SSM + 20% Attention)
+python train.py --mode hybrid --preset medium --steps 5000 --ssm-every 5
+
+# Stochastic + INT8 + TopK sparse activations
+python train.py --mode stochastic --int8 --topk 0.2 --preset medium --steps 5000
+
 # 500M model on CPU (stable, no OOM)
 python train.py --mode stochastic --preset 500m --steps 10000 --batch-size 2 --device cpu --dtype float32
 
@@ -140,11 +155,15 @@ python scripts/benchmark_speed.py --steps 10
 
 | Flag | Description |
 |------|-------------|
-| `--mode ste\|stochastic` | Training mode (default: ste) |
-| `--ternary-scale` | [STE] Scale factor or [Stochastic] weight magnitude (default: 0.7) |
+| `--mode ste\|stochastic\|hybrid` | Training mode (default: ste) |
+| `--ternary-scale` | [STE/Stochastic] Scale factor (default: 0.7) |
 | `--threshold` | [Stochastic] Flip threshold (default: 20/scale) |
 | `--flip-every-n-steps` | [Stochastic] Check & flip bits every N steps (default: 5, cuts ~80% bit overhead) |
 | `--per-channel` | [STE] Per-channel quantization threshold |
+| `--int8` | [Stochastic/Hybrid] INT8 quantized activations forward (QAT effect) |
+| `--topk` | Keep top-k fraction of activations after norm (0.2 = 20%, default: 1.0 = off) |
+| `--ssm-every` | [Hybrid] Place attention every N blocks (default: 5 → 80% SSM) |
+| `--expand-factor` | [Hybrid] SSM inner expansion factor (default: 2) |
 | `--preset tiny\|medium\|large\|500m` | Model size |
 | `--data-cache` | Multi-source data directory (FineWeb+Cosmopedia+Orca) |
 | `--batch-size` | Batch size per step (default: 16) |
@@ -224,17 +243,19 @@ scripts/
 
 ternary_llm/
   quantization.py           # STE + Stochastic Bit-Flip autograd functions, pack/unpack
-  layers.py                 # TernaryLinear, StochasticTernaryLinear, RMSNorm
+  layers.py                 # TernaryLinear, StochasticTernaryLinear, RMSNorm, TopKActivation
   attention.py              # MultiHeadAttention with KV cache
   ffn.py                    # SwiGLU FFN: fused gate_up_proj (2×FFN dim)
+  ssm.py                    # Ternary SSM block (parallel-prefix scan, no Python loop)
+  hybrid.py                 # Hybrid SSM-Attention transformer model
   transformer.py            # Full model, generate with KV cache, sample
   data.py                   # ChunkedDataset, MultiSourceChunkedDataset
-  trainer.py                # TernaryTrainer (handles both modes, hybrid opt, checkpoint)
+  trainer.py                # TernaryTrainer + DMLAdamW (no lerp_ CPU fallback)
   int8.py                   # INT8 fake-quantization (reference, not used in model)
   __init__.py
   csrc/
-    ternary_ops_avx2.cpp    # C++ SIMD pack/unpack/matmul (AVX2)
-    ternary_ops_avx512.cpp  # C++ SIMD pack/unpack/matmul (AVX-512)
+    ternary_ops_avx2.cpp    # C++ SIMD pack/unpack/matmul/ternary_matmul_int8 (AVX2)
+    ternary_ops_avx512.cpp  # C++ SIMD pack/unpack/matmul/ternary_matmul_int8 (AVX-512)
     setup.py                # PyTorch extension build
     __init__.py
 
