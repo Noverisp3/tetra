@@ -322,6 +322,7 @@ class TernaryTrainer:
         self.fwd_time = 0.0
         self.bwd_time = 0.0
         self.micro_steps = 0
+        self._has_grads = False
 
         # Initial memory snapshot
         self.log_mem("init")
@@ -373,6 +374,7 @@ class TernaryTrainer:
         self.fwd_time += t1 - t0
         self.bwd_time += t2 - t1
         self.micro_steps += 1
+        self._has_grads = True
 
         return raw_loss
 
@@ -436,36 +438,39 @@ class TernaryTrainer:
                 self.bwd_time = 0.0
                 self.micro_steps = 0
 
-                # Gradient clipping (unique params only)
-                opt_t0 = time.perf_counter()
-                if self.scaler is not None:
-                    self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    self._unique_params(), self.config.grad_clip
-                )
-
-                # Optimizer step
-                if self.hybrid:
-                    self._hybrid_sync_gradients()
+                # Skip optimizer step if all micro-batches were NaN
+                opt_time = 0.0
+                if self._has_grads:
+                    self._has_grads = False
+                    opt_t0 = time.perf_counter()
                     if self.scaler is not None:
-                        self.scaler.step(self.optimizer)
-                    else:
-                        self.optimizer.step()
-                    self._hybrid_sync_weights()
-                else:
-                    if self.scaler is not None:
-                        self.scaler.step(self.optimizer)
-                    else:
-                        self.optimizer.step()
-                if self.scaler is not None:
-                    self.scaler.update()
-                self.optimizer.zero_grad(set_to_none=True)
-                if self.hybrid:
-                    self.model.zero_grad(set_to_none=True)
-                opt_time = time.perf_counter() - opt_t0
+                        self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self._unique_params(), self.config.grad_clip
+                    )
 
-                # Free cached allocator memory after optimizer step
-                self._clear_cache()
+                    # Optimizer step
+                    if self.hybrid:
+                        self._hybrid_sync_gradients()
+                        if self.scaler is not None:
+                            self.scaler.step(self.optimizer)
+                        else:
+                            self.optimizer.step()
+                        self._hybrid_sync_weights()
+                    else:
+                        if self.scaler is not None:
+                            self.scaler.step(self.optimizer)
+                        else:
+                            self.optimizer.step()
+                    if self.scaler is not None:
+                        self.scaler.update()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    if self.hybrid:
+                        self.model.zero_grad(set_to_none=True)
+                    opt_time = time.perf_counter() - opt_t0
+
+                    # Free cached allocator memory after optimizer step
+                    self._clear_cache()
 
                 # Stochastic Bit-Flip: apply accumulated flips every N steps
                 if (self.config.mode == "stochastic"
