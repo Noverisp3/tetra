@@ -18,36 +18,32 @@ _tokenizer_cache = None
 
 
 def get_tokenizer(tokenizer_dir="tokenizer"):
-    """Load tokenizer: GPT-2 (transformers) > custom BPE (tokenizers).
-
-    Uses HuggingFace GPT-2 tokenizer if transformers is installed.
-    Falls back to custom tetra_tokenizer.json.
-    """
+    """Load tokenizer: custom BPE (tokenizers) by default, GPT-2 if tokenizer_dir='gpt2'."""
     global _tokenizer_cache
     if _tokenizer_cache is not None:
         return _tokenizer_cache
 
-    # Try GPT-2 tokenizer via transformers (preferred)
-    try:
-        from transformers import GPT2Tokenizer
-        tok = GPT2Tokenizer.from_pretrained("gpt2")
-        _tokenizer_cache = tok
-        return tok
-    except ImportError:
-        pass
-    except Exception:
-        pass
-
-    # Fallback: custom BPE tokenizer
+    # Custom BPE (default) — simpler, smaller vocab, no transformers dependency
     from tokenizers import Tokenizer
     tok_path = Path(tokenizer_dir) / "tetra_tokenizer.json"
-    if not tok_path.exists():
-        raise FileNotFoundError(
-            f"Tokenizer not found at {tok_path}.\n"
-            f"Run: python train_tokenizer.py"
-        )
-    _tokenizer_cache = Tokenizer.from_file(str(tok_path))
-    return _tokenizer_cache
+    if tok_path.exists():
+        _tokenizer_cache = Tokenizer.from_file(str(tok_path))
+        return _tokenizer_cache
+
+    # GPT-2 (transformers) — only if explicitly named "gpt2"
+    if tokenizer_dir == "gpt2":
+        try:
+            from transformers import GPT2Tokenizer
+            tok = GPT2Tokenizer.from_pretrained("gpt2")
+            _tokenizer_cache = tok
+            return tok
+        except Exception:
+            pass
+
+    raise FileNotFoundError(
+        f"Tokenizer not found at {tok_path}.\n"
+        f"Run: python train_tokenizer.py or use --tokenizer-dir gpt2"
+    )
 
 
 class TokenizerWrapper:
