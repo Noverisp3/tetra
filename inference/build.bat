@@ -1,5 +1,28 @@
 @echo off
-call "C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvarsall.bat" x64
+set VC_VARS=
+where vswhere >nul 2>nul
+if %errorlevel% equ 0 (
+    for /f "usebackq delims=" %%i in (`vswhere -latest -property installationPath`) do (
+        if exist "%%i\VC\Auxiliary\Build\vcvarsall.bat" set "VC_VARS=%%i\VC\Auxiliary\Build\vcvarsall.bat"
+    )
+)
+if "%VC_VARS%"=="" (
+    if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" set "VC_VARS=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"
+)
+if "%VC_VARS%"=="" (
+    if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat" set "VC_VARS=C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat"
+)
+if "%VC_VARS%"=="" (
+    if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" set "VC_VARS=C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"
+)
+if "%VC_VARS%"=="" (
+    if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat" set "VC_VARS=C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat"
+)
+if "%VC_VARS%"=="" (
+    echo ERROR: Visual Studio not found. Install VS 2022/2019 or set VC_VARS manually.
+    exit /b 1
+)
+call "%VC_VARS%" x64
 if %errorlevel% neq 0 (
     echo vcvarsall.bat failed
     exit /b 1
