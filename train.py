@@ -307,10 +307,14 @@ def main():
     prompt_ids = enc.encode(prompt)
     prompt_tensor = torch.tensor([prompt_ids], device=trainer.device)
     model.eval()
-    gen_cfg = dict(max_new_tokens=200, temperature=0.8, top_k=50)
     t0 = time.perf_counter()
     with torch.no_grad():
-        output = model.generate(prompt_tensor, **gen_cfg)
+        output = model.generate(
+            prompt_tensor,
+            max_new_tokens=200,
+            temperature=0.8,
+            top_k=50,
+        )
     gen_time = time.perf_counter() - t0
     n_prompt = prompt_tensor.size(1)
     n_gen = output.size(1) - n_prompt
