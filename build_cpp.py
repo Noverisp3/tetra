@@ -44,7 +44,7 @@ w = torch.randint(0, 3, (n,), dtype=torch.uint8).float() - 1.0
 packed = ops_avx2.pack_ternary(w)
 w2 = ops_avx2.unpack_ternary(packed, [n])
 assert (w - w2).abs().max().item() < 1e-5, "AVX2 pack/unpack failed"
-print("  AVX2: OK")
+print("AVX2: OK")
 
 # Build AVX-512 version (loaded at runtime if CPU supports it)
 avx512_src = os.path.join(base_dir, "ternary_ops_avx512.cpp")
@@ -61,9 +61,9 @@ if os.path.exists(avx512_src):
         packed2 = ops_avx512.pack_ternary(w)
         w3 = ops_avx512.unpack_ternary(packed2, [n])
         assert (w - w3).abs().max().item() < 1e-5, "AVX-512 pack/unpack failed"
-        print("  AVX-512: OK")
+        print("AVX-512: OK")
     except Exception as e:
-        print(f"  AVX-512: skipped ({e})")
+        print(f"AVX-512: skipped ({e})")
 else:
     print("\n  AVX-512 source not found, skipping")
 

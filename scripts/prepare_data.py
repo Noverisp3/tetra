@@ -77,10 +77,8 @@ def stream_source(source_key, source_cfg, tokenizer, target_tokens, output_dir):
     ratio = source_cfg["ratio"]
     source_target = int(target_tokens * ratio)
 
-    print(f"\n{'='*60}")
-    print(f"  {source_key.upper()}")
-    print(f"  Target: {source_target:,} tokens ({ratio*100:.0f}%)")
-    print(f"{'='*60}")
+    print(f"\n{source_key.upper()}")
+    print(f"Target: {source_target:,} tokens ({ratio*100:.0f}%)")
 
     # Load dataset in streaming mode
     kwargs = {"split": source_cfg["split"], "streaming": True}
@@ -97,7 +95,7 @@ def stream_source(source_key, source_cfg, tokenizer, target_tokens, output_dir):
     # Wrap SlimOrca in infinite cycle
     if source_key == "orca":
         ds = _cycling_iter(ds)
-        print("  (cycling enabled for oversampling)")
+        print("(cycling enabled for oversampling)")
 
     eos_id = tokenizer.token_to_id("<EOS>")
     buffer = []
@@ -199,26 +197,24 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 60)
-    print("  Tetra Multi-Source Data Preparation")
-    print("=" * 60)
-    print(f"  Target: {target:,} tokens")
-    print(f"  Chunk size: {CHUNK_TOKENS:,} tokens")
-    print(f"  Output: {output_dir}/")
-    print(f"  Sources: {args.sources}")
+    print("Tetra Multi-Source Data Preparation")
+    print(f"Target: {target:,} tokens")
+    print(f"Chunk size: {CHUNK_TOKENS:,} tokens")
+    print(f"Output: {output_dir}/")
+    print(f"Sources: {args.sources}")
 
     # Load tokenizer
     tokenizer = get_tokenizer_compat(args.tokenizer_dir)
     eos_id = tokenizer.token_to_id("<EOS>")
-    print(f"  Tokenizer vocab: {tokenizer.n_vocab}")
-    print(f"  EOS token ID: {eos_id}")
+    print(f"Tokenizer vocab: {tokenizer.n_vocab}")
+    print(f"EOS token ID: {eos_id}")
 
     # Prepare each source
     manifest = {"sources": {}, "total_tokens": 0, "vocab_size": tokenizer.n_vocab}
 
     for source_key in args.sources:
         if source_key not in SOURCES:
-            print(f"  Unknown source: {source_key}, skipping")
+            print(f"Unknown source: {source_key}, skipping")
             continue
 
         source_cfg = SOURCES[source_key]
@@ -237,13 +233,11 @@ def main():
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
 
-    print(f"\n{'='*60}")
-    print(f"  COMPLETE")
-    print(f"{'='*60}")
-    print(f"  Total tokens: {manifest['total_tokens']:,}")
+    print("COMPLETE")
+    print(f"Total tokens: {manifest['total_tokens']:,}")
     for src, info in manifest["sources"].items():
         print(f"    {src}: {info['n_tokens']:,} tokens, {info['n_documents']:,} docs")
-    print(f"  Manifest saved to {manifest_path}")
+    print(f"Manifest saved to {manifest_path}")
 
 
 if __name__ == "__main__":

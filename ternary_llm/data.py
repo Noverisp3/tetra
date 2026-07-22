@@ -1,4 +1,4 @@
-"""Data pipeline for Tetra -- tokenizer, dataset, dataloaders.
+﻿"""Data pipeline for Tetra -- tokenizer, dataset, dataloaders.
 
 Uses a custom BPE tokenizer trained on TinyStories (not GPT-2/tiktoken).
 Tokenizer is stored in tokenizer/tetra_tokenizer.json.
@@ -44,7 +44,7 @@ def get_tokenizer(tokenizer_dir="tokenizer"):
             _tokenizer_cache = tok
             return tok
         except ImportError:
-            print("  Warning: transformers not installed, falling through to custom tokenizer")
+            print("Warning: transformers not installed, falling through to custom tokenizer")
 
     raise FileNotFoundError(
         f"Tokenizer not found at {tok_path}.\n"
@@ -133,7 +133,7 @@ def download_and_tokenize(cache_dir="data", tokenizer_dir="tokenizer", max_stori
         tokens = np.memmap(str(bin_path), dtype=np.uint16, mode="r")
         with open(meta_path) as f:
             metadata = json.load(f)
-        print(f"  Tokens: {len(tokens):,} | Vocab: {metadata['vocab_size']}")
+        print(f"Tokens: {len(tokens):,} | Vocab: {metadata['vocab_size']}")
         return tokens, metadata
 
     # Find TinyStories text file (prefer V2 GPT-4)
@@ -163,8 +163,8 @@ def download_and_tokenize(cache_dir="data", tokenizer_dir="tokenizer", max_stori
                 downloaded += len(chunk)
         actual_mb = txt_path.stat().st_size / 1e6
         if expected_size and abs(downloaded - expected_size) > 1024:
-            print(f"  Warning: downloaded {downloaded} bytes, expected {expected_size}")
-        print(f"  Downloaded to {txt_path} ({actual_mb:.0f} MB)")
+            print(f"Warning: downloaded {downloaded} bytes, expected {expected_size}")
+        print(f"Downloaded to {txt_path} ({actual_mb:.0f} MB)")
 
     print(f"Reading {txt_path} ({txt_path.stat().st_size / 1e6:.0f} MB)...")
     with open(txt_path, "r", encoding="utf-8") as f:
@@ -173,11 +173,11 @@ def download_and_tokenize(cache_dir="data", tokenizer_dir="tokenizer", max_stori
     print("Splitting into stories...")
     stories = text.split("\n\n\n")
     stories = [s.strip() for s in stories if s.strip()]
-    print(f"  Found {len(stories):,} stories")
+    print(f"Found {len(stories):,} stories")
 
     if max_stories:
         stories = stories[:max_stories]
-        print(f"  Using first {max_stories:,} stories")
+        print(f"Using first {max_stories:,} stories")
 
     eos_id = tok_wrap.eot_token
 
@@ -190,11 +190,11 @@ def download_and_tokenize(cache_dir="data", tokenizer_dir="tokenizer", max_stori
 
     tokens_array = np.array(all_tokens, dtype=np.uint16)
     total = len(tokens_array)
-    print(f"  Total: {len(stories):,} stories, {total:,} tokens")
+    print(f"Total: {len(stories):,} stories, {total:,} tokens")
 
     tokens_array.tofile(str(bin_path))
     mb = bin_path.stat().st_size / 1e6
-    print(f"  Saved to {bin_path} ({mb:.1f} MB)")
+    print(f"Saved to {bin_path} ({mb:.1f} MB)")
 
     metadata = {"vocab_size": tok_wrap.n_vocab, "total_tokens": total}
     with open(meta_path, "w") as f:
@@ -290,7 +290,7 @@ class MultiSourceChunkedDataset(Dataset):
         for src_name, src_info in self.manifest["sources"].items():
             chunks = sorted(data_dir.glob(f"{src_name}_*.bin"))
             if not chunks:
-                print(f"  WARNING: No chunks found for source '{src_name}'")
+                print(f"WARNING: No chunks found for source '{src_name}'")
                 continue
 
             # Compute token count per chunk
@@ -320,10 +320,10 @@ class MultiSourceChunkedDataset(Dataset):
         if not self.sources:
             raise RuntimeError(f"No valid chunks found in {data_dir}")
 
-        print(f"  MultiSourceChunkedDataset:")
+        print(f"MultiSourceChunkedDataset:")
         for name, src in self.sources.items():
-            print(f"    {name}: {src['total_blocks']:,} blocks ({len(src['chunks'])} chunks, ratio={src['ratio']:.0%})")
-        print(f"    Total: {self.total_chunks:,} blocks")
+            print(f"{name}: {src['total_blocks']:,} blocks ({len(src['chunks'])} chunks, ratio={src['ratio']:.0%})")
+        print(f"Total: {self.total_chunks:,} blocks")
 
         # Split into train/val
         self.val_start = int(self.total_chunks * (1 - val_split))

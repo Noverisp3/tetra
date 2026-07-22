@@ -65,9 +65,7 @@ def main():
     NUM_STEPS = 50
     LR = 3e-4
 
-    print("=" * 60)
     print("Ternary LLM Prototype Test")
-    print("=" * 60)
 
     # Create model
     model = TernaryTransformerModel(
@@ -86,9 +84,9 @@ def main():
         if "latent_weights" in name
     )
     print(f"\nModel Info:")
-    print(f"  Total parameters: {total_params:,}")
-    print(f"  Ternary parameters: {ternary_params:,}")
-    print(f"  Ternary bits: ~{ternary_params * 1.58 / 1e6:.2f} MB (at 1.58 bits)")
+    print(f"Total parameters: {total_params:,}")
+    print(f"Ternary parameters: {ternary_params:,}")
+    print(f"Ternary bits: ~{ternary_params * 1.58 / 1e6:.2f} MB (at 1.58 bits)")
 
     # Create data
     input_ids, targets = create_synthetic_data(
@@ -106,7 +104,6 @@ def main():
 
     # Training loop
     print(f"\nTraining for {NUM_STEPS} steps...")
-    print("-" * 60)
 
     losses = []
     for step in range(NUM_STEPS):
@@ -122,14 +119,13 @@ def main():
         # Print progress
         if (step + 1) % 10 == 0:
             avg_loss = sum(losses[-10:]) / 10
-            print(f"  Step {step+1:3d}/{NUM_STEPS} | Loss: {avg_loss:.4f}")
+            print(f"Step {step+1:3d}/{NUM_STEPS} | Loss: {avg_loss:.4f}")
 
     # Validation
     model.eval()
     with torch.no_grad():
         val_logits, val_loss = model(val_ids, val_targets)
 
-    print("-" * 60)
     print(f"Final train loss: {losses[-1]:.4f}")
     print(f"Validation loss: {val_loss.item():.4f}")
 
@@ -143,15 +139,15 @@ def main():
             w_ternary = (w_ternary / gamma).clamp(-1, 1).round()
             unique = w_ternary.unique().tolist()
             zeros_pct = (w_ternary == 0).float().mean() * 100
-            print(f"  {name}: values={unique}, zeros={zeros_pct:.1f}%")
+            print(f"{name}: values={unique}, zeros={zeros_pct:.1f}%")
 
     # Test generation
     print("\nTesting generation:")
     model.eval()
     prompt = torch.randint(0, VOCAB_SIZE, (1, 5))
     generated = model.generate(prompt, max_new_tokens=10, temperature=0.8)
-    print(f"  Prompt:     {prompt[0].tolist()}")
-    print(f"  Generated:  {generated[0].tolist()}")
+    print(f"Prompt:     {prompt[0].tolist()}")
+    print(f"Generated:  {generated[0].tolist()}")
 
     # Check if loss decreased
     early_loss = sum(losses[:5]) / 5
@@ -161,9 +157,7 @@ def main():
     else:
         print("\nWarning: Loss did not decrease - may need hyperparameter tuning")
 
-    print("\n" + "=" * 60)
-    print("Prototype test complete!")
-    print("=" * 60)
+    print("\nPrototype test complete!")
 
 
 if __name__ == "__main__":

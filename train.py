@@ -41,7 +41,7 @@ def export_graph(trainer, save_dir):
         import matplotlib.pyplot as plt
         import numpy as np
     except ImportError:
-        print("  matplotlib not installed, skipping graph")
+        print("matplotlib not installed, skipping graph")
         return
 
     losses = np.array(trainer.train_losses)
@@ -88,7 +88,7 @@ def export_graph(trainer, save_dir):
     graph_path = Path(save_dir) / "loss_plot.png"
     plt.savefig(graph_path, dpi=150)
     plt.close()
-    print(f"  Training graph saved to {graph_path}")
+    print(f"Training graph saved to {graph_path}")
 
 
 def main():
@@ -145,40 +145,40 @@ def main():
 
     # Input validation
     if args.steps is not None and args.steps < 1:
-        print("  ERROR: --steps must be >= 1")
+        print("ERROR: --steps must be >= 1")
         sys.exit(1)
     if args.lr is not None and args.lr <= 0:
-        print("  ERROR: --lr must be positive")
+        print("ERROR: --lr must be positive")
         sys.exit(1)
     if args.batch_size is not None and args.batch_size < 1:
-        print("  ERROR: --batch-size must be >= 1")
+        print("ERROR: --batch-size must be >= 1")
         sys.exit(1)
     if args.grad_accum is not None and args.grad_accum < 1:
-        print("  ERROR: --grad-accum must be >= 1")
+        print("ERROR: --grad-accum must be >= 1")
         sys.exit(1)
     if args.block_size is not None and args.block_size < 16:
-        print("  ERROR: --block-size must be >= 16")
+        print("ERROR: --block-size must be >= 16")
         sys.exit(1)
     if args.hidden_dim is not None and args.hidden_dim < 64:
-        print("  ERROR: --hidden-dim must be >= 64")
+        print("ERROR: --hidden-dim must be >= 64")
         sys.exit(1)
     if args.num_layers is not None and args.num_layers < 1:
-        print("  ERROR: --num-layers must be >= 1")
+        print("ERROR: --num-layers must be >= 1")
         sys.exit(1)
     if args.num_heads is not None and args.num_heads < 1:
-        print("  ERROR: --num-heads must be >= 1")
+        print("ERROR: --num-heads must be >= 1")
         sys.exit(1)
     if args.ffn_dim is not None and args.ffn_dim < 64:
-        print("  ERROR: --ffn-dim must be >= 64")
+        print("ERROR: --ffn-dim must be >= 64")
         sys.exit(1)
     if args.ternary_scale is not None and args.ternary_scale <= 0:
-        print("  ERROR: --ternary-scale must be positive")
+        print("ERROR: --ternary-scale must be positive")
         sys.exit(1)
     if args.topk is not None and not (0 < args.topk <= 1):
-        print("  ERROR: --topk must be in (0, 1]")
+        print("ERROR: --topk must be in (0, 1]")
         sys.exit(1)
     if args.num_workers is not None and args.num_workers < 0:
-        print("  ERROR: --num-workers must be >= 0")
+        print("ERROR: --num-workers must be >= 0")
         sys.exit(1)
 
     config = TrainingConfig()
@@ -188,7 +188,7 @@ def main():
         preset = PRESETS[args.preset]
         for k, v in preset.items():
             setattr(config, k, v)
-        print(f"  Using preset: {args.preset} ({sum(v*v*4 for v in [preset['hidden_dim']]*3):,}+ params)")
+        print(f"Using preset: {args.preset} ({sum(v*v*4 for v in [preset['hidden_dim']]*3):,}+ params)")
 
     # Override from args (highest priority)
     if args.steps:
@@ -228,7 +228,7 @@ def main():
     if args.data_cache:
         data_cache = Path(args.data_cache)
         if not data_cache.exists():
-            print(f"  ERROR: {data_cache} not found. Run prepare_data.py first.")
+            print(f"ERROR: {data_cache} not found. Run prepare_data.py first.")
             sys.exit(1)
         manifest_path = data_cache / "manifest.json"
         metadata_path = data_cache / "metadata.json"
@@ -237,8 +237,8 @@ def main():
             with open(manifest_path) as f:
                 manifest = json.load(f)
             config.vocab_size = manifest["vocab_size"]
-            print(f"  Sources: {list(manifest['sources'].keys())}")
-            print(f"  Total tokens: {manifest['total_tokens']:,}")
+            print(f"Sources: {list(manifest['sources'].keys())}")
+            print(f"Total tokens: {manifest['total_tokens']:,}")
             multi_source = True
         elif metadata_path.exists():
             print(f"\nLoading cached TinyStories from {data_cache}")
@@ -247,10 +247,10 @@ def main():
             config.vocab_size = meta["vocab_size"]
             bin_file = data_cache / "tinystories.bin"
             tokens = np.memmap(str(bin_file), dtype=np.uint16, mode="r")
-            print(f"  Tokens: {len(tokens):,}")
+            print(f"Tokens: {len(tokens):,}")
             multi_source = False
         else:
-            print(f"  ERROR: no manifest.json or metadata.json found in {data_cache}")
+            print(f"ERROR: no manifest.json or metadata.json found in {data_cache}")
             sys.exit(1)
     else:
         print("\nPreparing data (TinyStories)...")
@@ -338,27 +338,27 @@ def main():
         ) * 2
         attn_layers = sum(1 for l in model.layers if l.is_attention)
         ssm_layers = sum(1 for l in model.layers if not l.is_attention)
-        print(f"  Mode: Hybrid ({ssm_layers}× SSM + {attn_layers}× Attention)")
-        print(f"  Total params: {total_params:,}")
-        print(f"  Ternary params: {ternary_params:,} ({ternary_params / 8 / 1024:.0f} KB packed)")
+        print(f"Mode: Hybrid ({ssm_layers}× SSM + {attn_layers}× Attention)")
+        print(f"Total params: {total_params:,}")
+        print(f"Ternary params: {ternary_params:,} ({ternary_params / 8 / 1024:.0f} KB packed)")
     elif is_stochastic:
         ternary_params = sum(
             p.numel() for n, p in model.named_buffers()
             if "packed_weights" in n
         ) * 2  # 2 bits per weight
-        print(f"  Mode: Stochastic Bit-Flip (no latent weights)")
-        print(f"  Total params: {total_params:,}")
-        print(f"  Ternary params: {ternary_params:,} ({ternary_params / 8 / 1024:.0f} KB packed)")
-        print(f"  FP32 params: {total_params:,} ({(total_params) * 4 / 1024:.0f} KB)")
+        print(f"Mode: Stochastic Bit-Flip (no latent weights)")
+        print(f"Total params: {total_params:,}")
+        print(f"Ternary params: {ternary_params:,} ({ternary_params / 8 / 1024:.0f} KB packed)")
+        print(f"FP32 params: {total_params:,} ({(total_params) * 4 / 1024:.0f} KB)")
     else:
         ternary_params = sum(
             p.numel() for name, p in model.named_parameters()
             if "latent_weights" in name
         )
-        print(f"  Mode: STE (latent weights)")
-        print(f"  Total params: {total_params:,}")
-        print(f"  Ternary params: {ternary_params:,} ({ternary_params * 2 / 8 / 1024:.0f} KB packed)")
-        print(f"  FP32 params: {total_params - ternary_params:,} ({(total_params - ternary_params) * 4 / 1024:.0f} KB)")
+        print(f"Mode: STE (latent weights)")
+        print(f"Total params: {total_params:,}")
+        print(f"Ternary params: {ternary_params:,} ({ternary_params * 2 / 8 / 1024:.0f} KB packed)")
+        print(f"FP32 params: {total_params - ternary_params:,} ({(total_params - ternary_params) * 4 / 1024:.0f} KB)")
 
     # Step 4: Train
     print("\nStarting training...")
@@ -375,7 +375,7 @@ def main():
             if checkpoints:
                 resume_path = str(checkpoints[-1])
             else:
-                print("  No checkpoints found, starting fresh")
+                print("No checkpoints found, starting fresh")
                 resume_path = None
         else:
             resume_path = args.resume
@@ -394,7 +394,7 @@ def main():
         trainer.save_checkpoint(step)
         if args.graph:
             export_graph(trainer, config.save_dir)
-        print("  Checkpoint saved. Exiting.")
+        print("Checkpoint saved. Exiting.")
         sys.exit(130)
 
     if args.graph:
@@ -419,7 +419,7 @@ def main():
     n_prompt = prompt_tensor.size(1)
     n_gen = output.size(1) - n_prompt
     generated = enc.decode(output[0].tolist())
-    print(f"  Prompt: {n_prompt} tokens -> Generated: {n_gen} tokens in {gen_time:.2f}s ({n_gen/gen_time:.1f} tok/s)")
+    print(f"Prompt: {n_prompt} tokens -> Generated: {n_gen} tokens in {gen_time:.2f}s ({n_gen/gen_time:.1f} tok/s)")
     print(f"\n{generated}\n")
 
 

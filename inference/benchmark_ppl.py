@@ -60,9 +60,7 @@ def main():
     parser.add_argument("--max-batches", type=int, default=200)
     args = parser.parse_args()
 
-    print("=" * 60)
     print("Tetra Perplexity Benchmark")
-    print("=" * 60)
 
     # Load tokenizer
     enc = get_tokenizer_compat(args.tokenizer_dir)
@@ -109,19 +107,17 @@ def main():
     print(f"Model params: {total_params:,} (ternary: {ternary_params:,})")
 
     # Compute PyTorch perplexity
-    print(f"\nComputing PyTorch perplexity (block_size={args.block_size}, max_batches={args.max_batches})...")
+    print(f"Computing PyTorch perplexity (block_size={args.block_size}, max_batches={args.max_batches})...")
     ppl, avg_loss, n_tokens = compute_ppl_pytorch(
         model, val_tokens, args.block_size, args.max_batches
     )
-    print(f"\n  PyTorch PPL:     {ppl:.2f}")
-    print(f"  PyTorch Loss:    {avg_loss:.4f}")
-    print(f"  Tokens evaluated: {n_tokens:,}")
+    print(f"\nPyTorch PPL:     {ppl:.2f}")
+    print(f"PyTorch Loss:    {avg_loss:.4f}")
+    print(f"Tokens evaluated: {n_tokens:,}")
 
-    print("\n" + "=" * 60)
-    print("Note: C++ perplexity = PyTorch perplexity (exact same matmul)")
+    print("\nNote: C++ perplexity = PyTorch perplexity (exact same matmul)")
     print("C++ uses precomputed dequantized floats + SIMD dot product,")
     print("which computes the identical x @ w_ternary as PyTorch F.linear.")
-    print("=" * 60)
 
 
 if __name__ == "__main__":

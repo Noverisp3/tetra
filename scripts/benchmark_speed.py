@@ -45,9 +45,7 @@ def resolve_device():
 
 
 def benchmark_config(name, cfg, tokens, block_size, batch_size, steps, device):
-    print(f"\n{'='*60}")
-    print(f"  {name.upper()} MODEL")
-    print(f"{'='*60}")
+    print(f"\n{name.upper()} MODEL")
 
     model = TernaryTransformerModel(
         vocab_size=8192,
@@ -55,7 +53,9 @@ def benchmark_config(name, cfg, tokens, block_size, batch_size, steps, device):
         **cfg,
     )
     total, ternary, fp32 = count_params(model)
-    print(f"  Params: {total:,} (ternary: {ternary:,} / {ternary*2/8/1024:.0f} KB packed, fp32: {fp32:,} / {fp32*4/1024:.0f} KB)")
+    ternary_kb = ternary * 2 / 8 / 1024
+    fp32_kb = fp32 * 4 / 1024
+    print(f"Params: {total:,} (ternary: {ternary:,} / {ternary_kb:.0f} KB packed, fp32: {fp32:,} / {fp32_kb:.0f} KB)")
 
     model = model.to(device)
 
@@ -104,8 +104,8 @@ def benchmark_config(name, cfg, tokens, block_size, batch_size, steps, device):
     avg_ms = sum(step_times) / len(step_times)
     tokens_per_sec = (batch_size * block_size) / avg_ms * 1000
 
-    print(f"\n  Average: {avg_ms:.1f} ms/step | {tokens_per_sec:,.0f} tokens/sec")
-    print(f"  Loss range: {min(losses):.4f} - {max(losses):.4f}")
+    print(f"\nAverage: {avg_ms:.1f} ms/step | {tokens_per_sec:,.0f} tokens/sec")
+    print(f"Loss range: {min(losses):.4f} - {max(losses):.4f}")
 
     return {
         "name": name,
@@ -126,26 +126,24 @@ def main():
     parser.add_argument("--configs", nargs="+", default=["tiny", "medium", "large"])
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("  Tetra Training Speed Benchmark")
-    print("=" * 60)
-    print(f"  Steps: {args.steps} | Batch: {args.batch_size} | Block: {args.block_size}")
+    print("Tetra Training Speed Benchmark")
+    print(f"Steps: {args.steps} | Batch: {args.batch_size} | Block: {args.block_size}")
 
     device = resolve_device()
-    print(f"  Device: {device}")
+    print(f"Device: {device}")
 
     bin_path = Path("data") / "tinystories.bin"
     if not bin_path.exists():
-        print(f"  ERROR: {bin_path} not found")
+        print(f"ERROR: {bin_path} not found")
         return
 
     tokens = np.memmap(str(bin_path), dtype=np.uint16, mode="r")
-    print(f"  Tokens: {len(tokens):,}")
+    print(f"Tokens: {len(tokens):,}")
 
     results = []
     for name in args.configs:
         if name not in CONFIGS:
-            print(f"  Unknown config: {name}")
+            print(f"Unknown config: {name}")
             continue
         r = benchmark_config(
             name, CONFIGS[name], tokens,
@@ -154,19 +152,19 @@ def main():
         results.append(r)
 
     # Summary
-    print(f"\n{'='*60}")
-    print("  SUMMARY")
-    print(f"{'='*60}")
-    print(f"  {'Config':<10} {'Params':>12} {'ms/step':>10} {'tok/s':>10} {'Loss':>8}")
-    print(f"  {'-'*10} {'-'*12} {'-'*10} {'-'*10} {'-'*8}")
+    print(f"\nSUMMARY")
+    print(f"{'Config':<10} {'Params':>12} {'ms/step':>10} {'tok/s':>10} {'Loss':>8}")
     for r in results:
-        print(f"  {r['name']:<10} {r['params']:>12,} {r['avg_ms']:>9.1f}ms {r['tokens_per_sec']:>10,.0f} {r['loss_last']:>8.4f}")
+        print(
+            f"{r['name']:<10} {r['params']:>12,} "
+            f"{r['avg_ms']:>9.1f}ms {r['tokens_per_sec']:>10,.0f} {r['loss_last']:>8.4f}"
+        )
 
     # Extrapolate full training time
-    print(f"\n  Estimated time for 10K steps:")
+    print(f"\nEstimated time for 10K steps:")
     for r in results:
         hours = r['avg_ms'] * 10000 / 1000 / 3600
-        print(f"    {r['name']:<10}: {hours:.1f} hours")
+        print(f"{r['name']:<10}: {hours:.1f} hours")
 
 
 if __name__ == "__main__":

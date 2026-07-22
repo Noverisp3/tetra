@@ -25,7 +25,7 @@ def run(label, model, loader):
         losses.append(loss.item())
         best = min(best, loss.item())
     delta = losses[-1] - losses[0]
-    print(f"  {label}: start={losses[0]:.2f} best={best:.2f} end={losses[-1]:.2f} delta={delta:+.2f}")
+    print(f"{label}: start={losses[0]:.2f} best={best:.2f} end={losses[-1]:.2f} delta={delta:+.2f}")
 
 print("=" * 55)
 loader = DataLoader(ds, batch_size=bs, shuffle=True, drop_last=True, num_workers=0)

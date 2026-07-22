@@ -21,15 +21,15 @@ model = StochasticTransformerModel(
     vocab_size=8192, hidden_dim=2560, num_layers=6,
     num_heads=40, ffn_dim=6826, max_seq_len=1024, scale=1.0)
 model = model.to(device).train()
-print(f"  Created in {time.perf_counter()-t0:.1f}s")
+print(f"Created in {time.perf_counter()-t0:.1f}s")
 
 total = sum(p.numel() for p in model.parameters())
 ternary = sum(p.numel() for n,p in model.named_buffers() if 'packed' in n) * 2
-print(f"  Total params: {total:,} ({total/1e6:.0f}M)")
-print(f"  Ternary params: {ternary:,} ({ternary/1e6:.0f}M, {ternary/8/1024:.0f}KB packed)")
+print(f"Total params: {total:,} ({total/1e6:.0f}M)")
+print(f"Ternary params: {ternary:,} ({ternary/1e6:.0f}M, {ternary/8/1024:.0f}KB packed)")
 
 batch, seq = 2, 512  # half context to manage memory
-print(f"  Batch: {batch}, Seq: {seq}")
+print(f"Batch: {batch}, Seq: {seq}")
 x = torch.randint(0, 8192, (batch, seq))
 y = torch.randint(0, 8192, (batch, seq))
 
@@ -42,7 +42,7 @@ for p in model.parameters():
 # Zero accumulators
 for name, buf in model.named_buffers():
     if 'accumulator' in name: buf.zero_()
-print("  Warmup done")
+print("Warmup done")
 
 # Benchmark
 print("\nBenchmark (3 steps):")
@@ -56,7 +56,7 @@ for step in range(3):
     fwd_times.append(t1-t0)
     bwd_times.append(t2-t1)
     ram = __import__('psutil').Process().memory_info().rss / 1024**3
-    print(f"  Step {step+1}: fwd={t1-t0:.2f}s  bwd={t2-t1:.2f}s  total={t2-t0:.2f}s  RAM={ram:.1f}GB")
+    print(f"Step {step+1}: fwd={t1-t0:.2f}s  bwd={t2-t1:.2f}s  total={t2-t0:.2f}s  RAM={ram:.1f}GB")
 
 af = sum(fwd_times)/len(fwd_times)
 ab = sum(bwd_times)/len(bwd_times)

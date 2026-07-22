@@ -221,7 +221,7 @@ class TernaryTrainer:
                     import torch_directml
                     self.device = torch_directml.device()
                 except ImportError:
-                    print("  WARNING: torch_directml not found, falling back to CPU")
+                    print("WARNING: torch_directml not found, falling back to CPU")
                     self.device = torch.device("cpu")
             else:
                 self.device = torch.device(config.device)
@@ -235,14 +235,14 @@ class TernaryTrainer:
                     self.device = torch_directml.device()
                 except Exception:
                     self.device = torch.device("cpu")
-        print(f"  Device: {self.device}")
+        print(f"Device: {self.device}")
 
         # C++ extension status
         from .quantization import _has_cpp
         if _has_cpp:
-            print("  C++ SIMD unpack: enabled (~1.2s/500M weights)")
+            print("C++ SIMD unpack: enabled (~1.2s/500M weights)")
         else:
-            print("  C++ SIMD unpack: disabled (build with: python build_cpp.py)")
+            print("C++ SIMD unpack: disabled (build with: python build_cpp.py)")
 
         self.model = model.to(self.device)
         self.train_loader = train_loader
@@ -269,7 +269,7 @@ class TernaryTrainer:
                 weight_decay=config.weight_decay,
                 foreach=False,
             )
-            print(f"  Hybrid mode: model on {self.device}, optimizer on CPU")
+            print(f"Hybrid mode: model on {self.device}, optimizer on CPU")
         else:
             # Standard: optimizer on same device as model
             is_dml = self.device.type == "privateuseone"
@@ -299,9 +299,9 @@ class TernaryTrainer:
             self.activation_dtype = torch.bfloat16 if bf16_ok else torch.float16
             if self.activation_dtype == torch.float16 and self.device.type == "cuda":
                 self.scaler = torch.amp.GradScaler("cuda")
-            print(f"  Activations: {str(self.activation_dtype).split('.')[-1]}")
+            print(f"Activations: {str(self.activation_dtype).split('.')[-1]}")
         else:
-            print(f"  Full precision: float32")
+            print(f"Full precision: float32")
 
         # Create save directory
         Path(config.save_dir).mkdir(parents=True, exist_ok=True)
@@ -530,7 +530,7 @@ class TernaryTrainer:
             num_batches += 1
 
         avg_val_loss = total_loss / max(num_batches, 1)
-        print(f"  Validation: step {self.scheduler.step_count}  loss={avg_val_loss:.4f}")
+        print(f"Validation: step {self.scheduler.step_count}  loss={avg_val_loss:.4f}")
         return avg_val_loss
 
     def _quantize_optimizer_to_fp16(self, opt_state: dict) -> dict:
@@ -609,14 +609,14 @@ class TernaryTrainer:
         path = Path(self.config.save_dir) / f"checkpoint_{step:06d}.pt"
         torch.save(_to_cpu(checkpoint), path)
         size_mb = path.stat().st_size / 1024 / 1024
-        print(f"  Checkpoint saved to {path} ({size_mb:.0f} MB)")
+        print(f"Checkpoint saved to {path} ({size_mb:.0f} MB)")
 
         # Cleanup: keep only 3 most recent checkpoints
         checkpoints = sorted(Path(self.config.save_dir).glob("checkpoint_*.pt"))
         while len(checkpoints) > 3:
             oldest = checkpoints.pop(0)
             oldest.unlink()
-            print(f"  Removed old checkpoint: {oldest.name}")
+            print(f"Removed old checkpoint: {oldest.name}")
 
         # Save training history at each checkpoint (crash-safe)
         history = {
@@ -696,8 +696,8 @@ class TernaryTrainer:
         self.train_log_steps = checkpoint.get("train_log_steps", [])
         self.val_losses = checkpoint.get("val_losses", [])
         self.learning_rates = checkpoint.get("learning_rates", [])
-        print(f"  Checkpoint loaded from {path} (step {checkpoint['step']})")
-        print(f"         Restored {len(self.train_losses)} train losses, {len(self.val_losses)} val losses")
+        print(f"Checkpoint loaded from {path} (step {checkpoint['step']})")
+        print(f"Restored {len(self.train_losses)} train losses, {len(self.val_losses)} val losses")
         return checkpoint["step"]
 
     def train(self, resume_step: int = 0):
@@ -720,10 +720,10 @@ class TernaryTrainer:
             x, y = sample_batch
             max_id = x.max().item()
             if max_id >= self.config.vocab_size:
-                print(f"  WARNING: Data contains token ID {max_id} >= vocab_size {self.config.vocab_size}!")
-                print(f"  Clamping will be applied. Re-prepare data with current tokenizer to fix.")
+                print(f"WARNING: Data contains token ID {max_id} >= vocab_size {self.config.vocab_size}!")
+                print(f"Clamping will be applied. Re-prepare data with current tokenizer to fix.")
             else:
-                print(f"  Data OK: max token ID = {max_id} < vocab_size = {self.config.vocab_size}")
+                print(f"Data OK: max token ID = {max_id} < vocab_size = {self.config.vocab_size}")
         except Exception:
             pass
 
@@ -736,7 +736,7 @@ class TernaryTrainer:
         for group, base_lr in zip(self.scheduler.optimizer.param_groups, self.scheduler.base_lrs):
             group["lr"] = base_lr * lr_scale
         if resume_step > 0:
-            print(f"  Resumed from step {resume_step}, LR = {self.scheduler.optimizer.param_groups[0]['lr']:.6f}")
+            print(f"Resumed from step {resume_step}, LR = {self.scheduler.optimizer.param_groups[0]['lr']:.6f}")
 
         while step < self.config.max_steps:
             step = self.train_epoch(step)

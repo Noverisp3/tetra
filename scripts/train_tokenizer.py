@@ -34,7 +34,7 @@ def find_tinystories(cache_dir: str = "data") -> str:
 
     print("ERROR: No TinyStories data found!")
     print(f"Please download TinyStoriesV2-GPT4-train.txt to {cache_path}/")
-    print("  https://huggingface.co/datasets/roneneldan/TinyStories/blob/main/TinyStoriesV2-GPT4-train.txt")
+    print("https://huggingface.co/datasets/roneneldan/TinyStories/blob/main/TinyStoriesV2-GPT4-train.txt")
     exit(1)
 
 
@@ -104,7 +104,7 @@ def train_tokenizer(
     out_path = Path(output_dir) / "tetra_tokenizer.json"
     tokenizer.save(str(out_path))
     print(f"Tokenizer saved to {out_path}")
-    print(f"  Vocab size: {tokenizer.get_vocab_size()}")
+    print(f"Vocab size: {tokenizer.get_vocab_size()}")
 
     # Save metadata
     import json
@@ -134,9 +134,9 @@ def train_tokenizer(
     for text in test_texts:
         encoded = tokenizer.encode(text)
         decoded = tokenizer.decode(encoded.ids)
-        print(f"  '{text[:50]}...'")
-        print(f"    tokens: {encoded.ids}")
-        print(f"    decoded: '{decoded[:50]}...'")
+        print(f"'{text[:50]}...'")
+        print(f"tokens: {encoded.ids}")
+        print(f"decoded: '{decoded[:50]}...'")
         print()
 
     return tokenizer
