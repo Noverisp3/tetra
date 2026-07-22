@@ -80,9 +80,8 @@ int main(int argc, char** argv) {
             next_token = model.header.vocab_size - 1;
         }
 
-        // Stream: print token ID immediately
-        if (i > 0) printf(" ");
-        printf("%d", next_token);
+        // Stream: print token ID immediately (one per line for Python bridge)
+        printf("%d\n", next_token);
         fflush(stdout);
 
         tokens.push_back(next_token);
