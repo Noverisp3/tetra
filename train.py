@@ -44,8 +44,11 @@ def export_graph(trainer, save_dir):
         print("  [GRAPH] matplotlib not installed, skipping")
         return
 
-    steps = trainer.train_log_steps or list(range(1, len(trainer.train_losses) + 1))
     losses = np.array(trainer.train_losses)
+    if len(trainer.train_log_steps) == len(losses):
+        steps = trainer.train_log_steps
+    else:
+        steps = list(range(1, len(losses) + 1))
 
     # EMA smoothing (alpha=0.85)
     def smooth(y, alpha=0.85):
@@ -61,8 +64,7 @@ def export_graph(trainer, save_dir):
     ax.plot(steps, losses, color="#b0c4de", linewidth=1, alpha=0.5, label="Raw")
     ax.plot(steps, smooth(losses), color="#4a90d9", linewidth=2, label="Smoothed")
     if trainer.val_losses:
-        val_steps = trainer.train_log_steps or list(range(1, len(trainer.train_losses) + 1))
-        val_idx = np.linspace(0, len(steps) - 1, len(trainer.val_losses), dtype=int)
+        val_idx = np.linspace(0, len(losses) - 1, len(trainer.val_losses), dtype=int)
         ax.plot(np.array(steps)[val_idx], trainer.val_losses,
                 color="#e74c3c", linewidth=2, marker="o", markersize=4, label="Val")
     ax.set_xlabel("Step")
