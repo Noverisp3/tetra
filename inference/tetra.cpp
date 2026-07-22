@@ -16,6 +16,7 @@
 #include <string>
 #include <sstream>
 #include <chrono>
+#include <ctime>
 
 static std::vector<int> parse_tokens(const char* str) {
     std::vector<int> tokens;
@@ -70,7 +71,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "Prefill: %.1f ms (%d tokens)\n", prefill_ms, (int)tokens.size());
 
     // Generate: feed only newly generated tokens (logits already from prefill for step 0)
-    srand(42);
+    srand((unsigned int)time(NULL));
     auto t4 = std::chrono::high_resolution_clock::now();
     int generated = 0;
     bool stopped = false;

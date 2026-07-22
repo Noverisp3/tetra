@@ -522,58 +522,54 @@ static std::vector<float> forward(
     return logits;
 }
 
-// Sampling
-// Top-k: keep only top k tokens, then top-p: keep smallest set with cumprob >= p.
+// Sampling matching PyTorch order: temp scale → top-k (set to -inf) → softmax → top-p → sample
 static int sample(const std::vector<float>& logits, float temperature, int top_k, float top_p) {
     int n = (int)logits.size();
-    float mx = *std::max_element(logits.begin(), logits.end());
-    std::vector<float> probs(n);
-    for (int i = 0; i < n; i++) probs[i] = expf((logits[i] - mx) / temperature);
+    std::vector<float> scaled(n);
 
-    // Top-k filtering: zero out tokens outside top k
+    // Step 1: Temperature scaling (matching PyTorch: logits /= temperature)
+    for (int i = 0; i < n; i++) scaled[i] = logits[i] / temperature;
+
+    // Step 2: Top-k — set tokens below threshold to -inf (matching PyTorch)
     if (top_k > 0 && top_k < n) {
-        std::vector<int> indices(n);
-        std::iota(indices.begin(), indices.end(), 0);
-        std::partial_sort(indices.begin(), indices.begin() + top_k, indices.end(),
-            [&](int a, int b) { return probs[a] > probs[b]; });
-        float z = 0.0f;
-        for (int i = 0; i < top_k; i++) z += probs[indices[i]];
-        // Save top-k values before zeroing
-        std::vector<float> top_vals(top_k);
-        for (int i = 0; i < top_k; i++) top_vals[i] = probs[indices[i]];
-        for (int i = 0; i < n; i++) probs[i] = 0.0f;
-        for (int i = 0; i < top_k; i++) probs[indices[i]] = z > 0 ? top_vals[i] / z : 1.0f / top_k;
+        std::vector<int> idx(n);
+        std::iota(idx.begin(), idx.end(), 0);
+        std::partial_sort(idx.begin(), idx.begin() + top_k, idx.end(),
+            [&](int a, int b) { return scaled[a] > scaled[b]; });
+        float threshold = scaled[idx[top_k - 1]];
+        for (int i = 0; i < n; i++)
+            if (scaled[i] < threshold) scaled[i] = -INFINITY;
     }
 
-    // Top-p (nucleus) filtering: keep smallest set with cumprob >= top_p
-    if (top_p < 1.0f && top_p > 0.0f) {
-        std::vector<int> indices(n);
-        std::iota(indices.begin(), indices.end(), 0);
-        std::sort(indices.begin(), indices.end(),
-            [&](int a, int b) { return probs[a] > probs[b]; });
-        float cum = 0.0f;
-        int cutoff = n;
-        for (int i = 0; i < n; i++) {
-            cum += probs[indices[i]];
-            if (cum >= top_p) { cutoff = i + 1; break; }
-        }
-        float z = 0.0f;
-        for (int i = 0; i < cutoff; i++) z += probs[indices[i]];
-        // Save values before zeroing
-        std::vector<float> top_vals(cutoff);
-        for (int i = 0; i < cutoff; i++) top_vals[i] = probs[indices[i]];
-        for (int i = 0; i < n; i++) probs[i] = 0.0f;
-        for (int i = 0; i < cutoff; i++) probs[indices[i]] = z > 0 ? top_vals[i] / z : 1.0f / cutoff;
-    }
-
-    // Renormalize and sample
+    // Step 3: Softmax (matching PyTorch: F.softmax(logits, dim=-1))
+    float mx = *std::max_element(scaled.begin(), scaled.end());
     float sum = 0.0f;
-    for (int i = 0; i < n; i++) sum += probs[i];
-    if (sum > 0) for (int i = 0; i < n; i++) probs[i] /= sum;
+    for (int i = 0; i < n; i++) {
+        scaled[i] = expf(scaled[i] - mx);
+        sum += scaled[i];
+    }
+    if (sum > 0) for (int i = 0; i < n; i++) scaled[i] /= sum;
 
+    // Step 4: Top-p (nucleus) — zero out tokens below cumprob threshold
+    if (top_p > 0.0f && top_p < 1.0f) {
+        std::vector<int> idx(n);
+        std::iota(idx.begin(), idx.end(), 0);
+        std::sort(idx.begin(), idx.end(),
+            [&](int a, int b) { return scaled[a] > scaled[b]; });
+        float cum = 0.0f;
+        for (int i = 0; i < n; i++) {
+            if (cum >= top_p) scaled[idx[i]] = 0.0f;
+            cum += scaled[idx[i]];
+        }
+        sum = 0.0f;
+        for (int i = 0; i < n; i++) sum += scaled[i];
+        if (sum > 0) for (int i = 0; i < n; i++) scaled[i] /= sum;
+    }
+
+    // Step 5: Sample from probability distribution
     float r = (float)rand() / RAND_MAX;
     float cum = 0.0f;
-    for (int i = 0; i < n; i++) { cum += probs[i]; if (r < cum) return i; }
+    for (int i = 0; i < n; i++) { cum += scaled[i]; if (r < cum) return i; }
     return n - 1;
 }
 
