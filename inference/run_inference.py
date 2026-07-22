@@ -41,7 +41,7 @@ def run_inference(model_path, prompt, max_tokens=100, temperature=0.8,
         return python_inference(model_path, tokens, max_tokens, temperature, top_k)
 
     print(f"Prompt: {prompt}")
-    print(f"{'─' * 60}")
+    print(f"{'=' * 60}")
 
     cmd = [
         str(exe_path), model_path, token_str,
@@ -58,16 +58,21 @@ def run_inference(model_path, prompt, max_tokens=100, temperature=0.8,
             continue
         if line.startswith("Output token IDs:"):
             break
-        # Streaming token ID — decode and print
-        try:
-            token_id = int(line)
+        # Parse token IDs (supports one-per-line or space-separated)
+        parts = line.split()
+        for part in parts:
+            try:
+                token_id = int(part)
+            except ValueError:
+                continue
             if token_id == EOS_TOKEN:
                 break
             chunk = enc.decode([token_id])
             generated += chunk
             print(chunk, end="", flush=True)
-        except ValueError:
-            pass
+        else:
+            continue
+        break
 
     proc.stdout.close()
     stderr = proc.stderr.read()
@@ -77,7 +82,7 @@ def run_inference(model_path, prompt, max_tokens=100, temperature=0.8,
     if stderr:
         print(stderr, file=sys.stderr)
 
-    print(f"\n{'─' * 60}")
+    print(f"\n{'=' * 60}")
     return generated
 
 
