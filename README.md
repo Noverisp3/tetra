@@ -41,21 +41,21 @@ Key design decisions:
 
 ```bash
 # Train tiny on TinyStories (auto-downloads if missing)
-python train.py --preset tiny --steps 5000 --dtype float16 --graph
+python train.py --preset tiny --steps 15000 --dtype float16 --graph
 
 # Resume from latest checkpoint + plot full history
-python train.py --preset tiny --steps 10000 --dtype float16 --graph --resume
+python train.py --preset tiny --steps 30000 --dtype float16 --graph --resume
 
 # Export to C++ binary (3.7 MB) and run inference
-python inference/export_model.py checkpoints/checkpoint_005000.pt inference/tetra_model.bin
+python inference/export_model.py checkpoints/checkpoint_015000.pt inference/tetra_model.bin
 cd inference && build.bat avx2 && cd ..
-python inference/run_inference.py inference/tetra_model.bin "Once upon a time" --max-tokens 50
+python inference/run_inference.py inference/tetra_model.bin "Once upon a time" --max-tokens 100
 
 # Use GPT-2 tokenizer instead of custom BPE
-python train.py --preset tiny --steps 5000 --dtype float16 --tokenizer-dir gpt2
+python train.py --preset tiny --steps 15000 --dtype float16 --tokenizer-dir gpt2
 
 # Multi-source data (1B tokens from FineWeb/Cosmopedia/Orca)
-python scripts/prepare_data.py --data-cache data
+python scripts/prepare_data.py --target-tokens 1e9
 python train.py --preset 500m --steps 15000 --dtype float16 --data-cache data --batch-size 4 --grad-accum 8
 ```
 
@@ -114,35 +114,32 @@ python run_inference.py tetra_model.bin "Once upon a time" --max-tokens 100
 
 ### Tiny 8.5M on TinyStories
 
-Trained for 5,000 steps on Intel Iris Xe (DirectML) in ~3 hours:
+Trained for 15,000 steps on Intel Iris Xe (DirectML) in ~9.5 hours:
 
 | Metric | Value |
 |--------|-------|
 | **Total params** | 8,523,008 (6.3M ternary + 2.2M FP32) |
 | **Exported binary** | **3.7 MB** (INT8 embedding + 2-bit ternary weights) |
-| **C++ inference** | **420+ tok/s** (AVX2) / 370+ tok/s (scalar) |
-| **Dataset** | TinyStoriesV2-GPT4, 535M tokens, 267K stories |
+| **C++ inference** | **424 tok/s** (AVX2) / 370+ tok/s (scalar) |
+| **Dataset** | TinyStoriesV2-GPT4, 535M tokens, 80K stories |
 | **Tokenizer** | Custom BPE, vocab=8192 |
 | **Mode** | STE (latent weights) |
 | **Batch** | 16 × 4 grad_accum = 64 effective |
-| **Speed** | 2.26s/step |
-| **Final train loss** | 4.3092 |
-| **Final val loss** | 4.3182 |
-| **Loss trend** | 60.96 → 4.31 (converged smoothly) |
+| **Speed** | 2.28s/step |
+| **Final train loss** | 3.7507 |
+| **Final val loss** | 3.7663 |
+| **Loss trend** | 61.02 → 3.75 (converged smoothly) |
 
 <p align="center">
   <img src="examples/tiny/loss_plot.png" alt="Training Loss Plot" width="85%">
   <br>
-  <em><b>Figure 1:</b> Convergence curve of Tetra 8.5M (STE) on TinyStories (5,000 steps, Cosine LR Decay with Warmup). Plot includes raw + EMA-smoothed train loss and validation loss.</em>
+  <em><b>Figure 1:</b> Convergence curve of Tetra 8.5M (STE) on TinyStories (15,000 steps, Cosine LR Decay with Warmup). Plot includes raw + EMA-smoothed train loss and validation loss.</em>
 </p>
 
-Sample output (PyTorch generate):
-> "Hello , Tim to find food the ball like . " I can help he . You mom said . He is . We ' s . You you !" Sue ' s room and a tree away . She is . " Let . He likes . She says . It is . She had and said need the bear and they played too . They were best , Tim and she were very happy on the bird . They went the ground , Tom smiled and laughed away him they could . The cat . The bird ' s a nice . They looked . They played all lived . But then it . <| endoftext |> Once upon a time , there was a little boy named Tim . The truck was very the rock . One day , she saw what . The boat and said , she could , " Thank said , Tim . He found it !" The bird to play with his mom , " Can you something and said , " Maybe to play . The end . She saw a big , he wanted to find to his family the hole"
+C++ inference (exported binary, AVX2, 3.7 MB, 424 tok/s):
+> "Once upon a time to play a little girl named Lily. She was very much. Mia saw a big, she was so happy and a new little boy to make her toys, 'Don's time for you?' Lily said, 'I don'm sorry the toy car.' Mia did not listen the girl smiled and said, 'No, we should. I have fun worry. I want to be careful.' Lily said, you are going. 'Thank, you can help me and they are nice.'"
 
-C++ inference (exported binary, AVX2, 3.7 MB, 420+ tok/s):
-> "Once upon a time , there was a little girl named Tim . The moral she saw . The man it to play with it was sad it . The . The little bird his . It was a loud . It was happy and put it . The . The moral to play . She saw a big fish and said , but , 'No will , I't worry's mine to me , but you can , 'I'm't worry.' They all played . Lily and he did not know and ran ."
-
-Limited but recognizable — expected for 8.5M ternary params on simple stories. Training to 20k–30k steps on TinyStoriesV2 significantly improves coherence.
+Limited but coherent — expected for 8.5M ternary params trained for 15k steps on TinyStories. Training to 30k–50k steps would further improve narrative quality.
 
 
 ## Project Structure
