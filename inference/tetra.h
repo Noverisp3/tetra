@@ -148,13 +148,14 @@ static void precompute_floats(TernaryWeightXNOR& w) {
     }
 }
 
-// Precomputed float matmul with prefetch
+// Precomputed float matmul with prefetch + alpha scaling
 static void ternary_matmul_precomputed(
     const float* x, const TernaryWeightXNOR& w, float* out
 ) {
+    const float alpha = w.alpha;
     const float* data = w.floats.data();
     for (int r = 0; r < w.rows; r++) {
-        out[r] = dot_product_simd(x, data + r * w.cols, w.cols);
+        out[r] = dot_product_simd(x, data + r * w.cols, w.cols) * alpha;
     }
 }
 
@@ -164,10 +165,11 @@ static void ternary_matmul_precomputed_decode(
 ) {
     const int rows = w.rows;
     const int cols = w.cols;
+    const float alpha = w.alpha;
     const float* data = w.floats.data();
     for (int r = 0; r < rows; r++) {
         if (r + 2 < rows) TETRA_PREFETCH(data + (r + 2) * cols);
-        out[r] = dot_product_simd(x, data + r * cols, cols);
+        out[r] = dot_product_simd(x, data + r * cols, cols) * alpha;
     }
 }
 
@@ -543,8 +545,11 @@ static std::vector<float> forward(
                 int actual_len = pos + 1;
                 const float* q_head = q.data() + head * HD;
                 for (int t = 0; t < actual_len; t++) {
-                    attn_scores[t] = dot_product_simd(q_head,
+                    float s = dot_product_simd(q_head,
                         cache.k_cache[l].data() + t * H + head * HD, HD) * scale;
+                    if (s > 80.0f) s = 80.0f;
+                    else if (s < -80.0f) s = -80.0f;
+                    attn_scores[t] = s;
                 }
                 softmax(attn_scores.data(), actual_len);
                 for (int d = 0; d < HD; d++) {
@@ -635,9 +640,13 @@ static std::vector<float> forward(
             for (int head = 0; head < NH; head++) {
                 float scale = 1.0f / sqrtf((float)HD);
                 const float* q_head = q.data() + j * H + head * HD;
-                for (int t = 0; t < actual_len; t++)
-                    attn_scores[t] = dot_product_simd(q_head,
+                for (int t = 0; t < actual_len; t++) {
+                    float s = dot_product_simd(q_head,
                         cache.k_cache[l].data() + t * H + head * HD, HD) * scale;
+                    if (s > 80.0f) s = 80.0f;
+                    else if (s < -80.0f) s = -80.0f;
+                    attn_scores[t] = s;
+                }
                 softmax(attn_scores.data(), actual_len);
                 for (int d = 0; d < HD; d++) {
                     float sum = 0.0f;
