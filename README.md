@@ -4,12 +4,12 @@
 
 <h1 align="center">Tetra - Pure Ternary LLM</h1>
 
-**Tetra** is a decoder-only transformer trained entirely with **ternary weights** ({-1, 0, +1}) and exported to a **3.7 MB C++ binary** that runs at **420+ tok/s** on CPU.
+**Tetra** is a decoder-only transformer trained entirely with **ternary weights** ({-1, 0, +1}) and exported to a **3.6 MB C++ binary** that runs at **450+ tok/s** on CPU.
 
 Three training modes:
 
 - **STE** (Straight-Through Estimator) — FP32 latent shadow weights quantized on-the-fly via absmean, gradient flows through STE. (BitNet b1.58 approach)
-- **Stochastic Bit-Flip** — no latent weights. Weights stored as packed 2-bit ternary. Gradient sign accumulated in FP32 accumulator; weight flips when |accumulator| > threshold.
+- **Stochastic Bit-Flip** — no latent weights. Weights stored as packed 2-bit ternary. Gradient sign accumulated in FP32 accumulator; weight flips when |accumulator| > threshold. Supports cosine threshold decay (`--threshold-decay-to`) and per-channel output scaling (`--per-channel`).
 - **Hybrid SSM-Attention** — 80% Ternary SSM (Mamba-style) + 20% Ternary Attention layers. SSM scan via vectorized parallel prefix (O(T), no Python loop).
 
 ## Architecture
@@ -18,7 +18,7 @@ Base BitNet b1.58-style transformer, optionally hybridized:
 
 | Component | STE / Stochastic | Hybrid |
 |-----------|-----------------|--------|
-| **Weights** | {-1, 0, +1} via absmean (STE) or packed 2-bit (Stochastic) | Same per-layer |
+| **Weights** | {-1, 0, +1} via absmean (STE) or packed 2-bit (Stochastic). Optional per-channel scaling alpha per output row. | Same per-layer |
 | **Attention** | Causal multi-head, KV cache, ternary Q/K/V/O projections | 20% of layers |
 | **SSM Block** | — | 80% of layers: RMSNorm → TernaryLinear(expand 2×) → depthwise Conv1d → SiLU → parallel-prefix SSM scan → gate → TernaryLinear(project back) |
 | **FFN** | SwiGLU: fused gate+up into one ternary matmul (2× FFN dim) | Same |
@@ -50,10 +50,10 @@ python train.py --preset tiny --steps 15000 --dtype float16 --graph
 # Resume from latest checkpoint + plot full history
 python train.py --preset tiny --steps 30000 --dtype float16 --graph --resume
 
-# Export to C++ binary (3.7 MB) and run inference
+# Export to C++ binary and run inference
 python inference/export_model.py checkpoints/checkpoint_015000.pt inference/tetra_model.bin
 cd inference && build.bat avx2 && cd ..
-python inference/run_inference.py inference/tetra_model.bin "Once upon a time" --max-tokens 100
+python inference/run_inference.py inference/tetra_model.bin "Once upon a time" --max-tokens 100 --repeat-penalty 1.1
 
 # Use GPT-2 tokenizer instead of custom BPE
 python train.py --preset tiny --steps 15000 --dtype float16 --tokenizer-dir gpt2
@@ -87,19 +87,19 @@ Pure C++17 inference engine (`inference/tetra.h`, no dependencies):
 
 | Feature | Detail |
 |---------|--------|
-| **File size** | 3.7 MB (ternary weights 2-bit packed, embeddings INT8 quantized) |
-| **Speed** | 420+ tok/s (AVX2, CPU), 370+ tok/s (scalar) |
-| **Prefill** | Batch prefill — all prompt tokens in one forward pass |
-| **Sampling** | Top-k + top-p + temperature, matches PyTorch order |
-| **Build** | `build.bat avx2` (auto-detects VS via vswhere) |
+| **File size** | 3.6 MB (ternary weights 2-bit packed, embeddings INT8 quantized) |
+| **Speed** | 450+ tok/s (AVX2, CPU), 360+ tok/s (scalar) |
+| **Prefill** | Parallel batch prefill — all prompt tokens in one forward pass (OpenMP) |
+| **Sampling** | Top-k + top-p + temperature + repetition penalty, matches PyTorch order |
+| **Build** | `build.bat avx2` (auto-detects VS via vswhere, enables `/openmp`) |
 
 ### Export & Run
 
 ```bash
 python inference/export_model.py checkpoints/checkpoint_*.pt inference/tetra_model.bin
 cd inference && build.bat avx2
-# Direct: provide token IDs
-tetra_avx2.exe tetra_model.bin "373,378,67,338" 100 0.8 50 0.9
+# Direct: provide token IDs + repeat_penalty (7th arg, 1.0=off)
+tetra_avx2.exe tetra_model.bin "373,378,67,338" 100 0.8 50 0.9 1.0
 # Or via Python with tokenizer
 python run_inference.py tetra_model.bin "Once upon a time" --max-tokens 100
 ```
@@ -109,10 +109,12 @@ python run_inference.py tetra_model.bin "Once upon a time" --max-tokens 100
 | Section | Encoding |
 |---------|----------|
 | Header (64B) | magic `TETR`, version, dims, param counts |
-| Ternary weights | name, shape, alpha, 2-bit packed (4 weights/byte) |
+| Ternary weights | name, shape, `num_alphas(2B)` + `alphas(N×4B)` (v3, empty=scalar `alpha=1.0`), 2-bit packed (4 weights/byte) |
 | FP32/INT8 weights | name, shape, dtype byte: `0`=FP32, `1`=INT8 + scale |
 | Embeddings | INT8 (token 8K×256→2.0 MB, pos 512×256→0.13 MB) |
 | Norms | FP32 (tiny, ~12 KB) |
+
+Per-channel alphas (`--per-channel` flag): each output row gets its own FP32 scaling factor, written as contiguous array after `num_alphas`. Backward-compatible with v2 — if `num_alphas=0` the reader falls back to scalar `alpha=1.0`.
 
 ## Examples
 
