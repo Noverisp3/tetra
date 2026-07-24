@@ -1,5 +1,5 @@
-// Usage: tetra.exe <model.bin> <token_ids> [max_new_tokens] [temperature] [top_k] [top_p]
-//   tetra.exe tetra_model.bin "373,378,67,338" 100 0.8 50 0.9
+// Usage: tetra.exe <model.bin> <token_ids> [max_new_tokens] [temperature] [top_k] [top_p] [repeat_penalty]
+//   tetra.exe tetra_model.bin "373,378,67,338" 100 0.8 50 0.9 1.1
 // Special tokens: 1=BOS, 2=EOS (auto-stops on EOS)
 
 #include "tetra.h"
@@ -27,8 +27,9 @@ static std::vector<int> parse_tokens(const char* str) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <model.bin> <token_ids> [max_new_tokens] [temperature] [top_k] [top_p]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <model.bin> <token_ids> [max_new_tokens] [temperature] [top_k] [top_p] [repeat_penalty]\n", argv[0]);
         fprintf(stderr, "  max_new_tokens=0: dump logits (no generation)\n");
+        fprintf(stderr, "  repeat_penalty: >1.0 penalizes repeated tokens (default: 1.0 = disabled)\n");
         fprintf(stderr, "  Special tokens: 1=BOS, 2=EOS (auto-stops on EOS)\n");
         return 1;
     }
@@ -39,6 +40,7 @@ int main(int argc, char** argv) {
     float temp = (argc > 4) ? atof(argv[4]) : 0.8f;
     int top_k = (argc > 5) ? atoi(argv[5]) : 50;
     float top_p = (argc > 6) ? atof(argv[6]) : 0.9f;
+    float repeat_penalty = (argc > 7) ? atof(argv[7]) : 1.0f;
 
     auto t0 = std::chrono::high_resolution_clock::now();
     tetra::Model model = tetra::load_model(model_path);
@@ -79,7 +81,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, " [truncated at max_seq_len=%d]\n", model.header.max_seq_len);
             break;
         }
-        int next_token = tetra::sample(logits, temp, top_k, top_p);
+        int next_token = tetra::sample(logits, temp, top_k, top_p, tokens, repeat_penalty);
         if (next_token >= (int)model.header.vocab_size) {
             next_token = model.header.vocab_size - 1;
         }

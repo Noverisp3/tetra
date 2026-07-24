@@ -21,7 +21,7 @@ def find_exe() -> Path | None:
 
 
 def run_inference(model_path, prompt, max_tokens=100, temperature=0.8,
-                  top_k=50, top_p=0.9, tokenizer_dir="tokenizer"):
+                  top_k=50, top_p=0.9, tokenizer_dir="tokenizer", repeat_penalty=1.0):
     enc = get_tokenizer_compat(tokenizer_dir)
     tokens = enc.encode(prompt)
     token_str = ",".join(str(t) for t in tokens)
@@ -37,6 +37,7 @@ def run_inference(model_path, prompt, max_tokens=100, temperature=0.8,
     cmd = [
         str(exe_path), model_path, token_str,
         str(max_tokens), str(temperature), str(top_k), str(top_p),
+        str(repeat_penalty),
     ]
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
@@ -124,11 +125,12 @@ def main():
     parser.add_argument("--temp", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--top-p", type=float, default=0.9)
+    parser.add_argument("--repeat-penalty", type=float, default=1.0)
     parser.add_argument("--tokenizer-dir", type=str, default="tokenizer")
     args = parser.parse_args()
 
     run_inference(args.model, args.prompt, args.max_tokens, args.temp,
-                  args.top_k, args.top_p, args.tokenizer_dir)
+                  args.top_k, args.top_p, args.tokenizer_dir, args.repeat_penalty)
 
 
 if __name__ == "__main__":

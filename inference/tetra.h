@@ -723,11 +723,22 @@ static std::mt19937& rng() {
     return gen;
 }
 
-static int sample(const std::vector<float>& logits, float temperature, int top_k, float top_p) {
+static int sample(const std::vector<float>& logits, float temperature, int top_k, float top_p,
+                  const std::vector<int>& context = {}, float repeat_penalty = 1.0f) {
     int n = (int)logits.size();
     std::vector<float> scaled(n);
+    for (int i = 0; i < n; i++) scaled[i] = logits[i];
 
-    for (int i = 0; i < n; i++) scaled[i] = logits[i] / temperature;
+    // Repetition penalty: penalize tokens already in context
+    if (repeat_penalty != 1.0f && !context.empty()) {
+        for (int id : context) {
+            if (id < 0 || id >= n) continue;
+            if (scaled[id] > 0.0f) scaled[id] /= repeat_penalty;
+            else scaled[id] *= repeat_penalty;
+        }
+    }
+
+    for (int i = 0; i < n; i++) scaled[i] /= temperature;
 
     if (top_k > 0 && top_k < n) {
         std::vector<int> idx(n);
