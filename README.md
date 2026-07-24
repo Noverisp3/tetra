@@ -12,20 +12,22 @@ Three training modes:
 - **Stochastic Bit-Flip** — no latent weights. Weights stored as packed 2-bit ternary. Gradient sign accumulated in FP32 accumulator; weight flips when |accumulator| > threshold. Supports cosine threshold decay (`--threshold-decay-to`), per-channel scaling (`--per-channel`), and per-group block scaling (`--group-size N`).
 - **Hybrid SSM-Attention** — 80% Ternary SSM (Mamba-style) + 20% Ternary Attention layers. SSM scan via vectorized parallel prefix (O(T), no Python loop).
 
+Plus **Multi-head Latent Attention (MLA)** — DeepSeek-V2-style KV compression for attention. Compresses K,V into a small latent vector (`--kv-latent-dim`, default 64) before caching, reducing KV cache by 4×. Uses decoupled RoPE with separate per-head Q/K rope projections (`--rope-per-head`, default 8). Compatible with Stochastic Bit-Flip mode (`--mla` flag).
+
 ## Architecture
 
 Base BitNet b1.58-style transformer, optionally hybridized:
 
-| Component | STE / Stochastic | Hybrid |
-|-----------|-----------------|--------|
-| **Weights** | {-1, 0, +1} via absmean (STE) or packed 2-bit (Stochastic). Optional per-channel or per-group scaling alpha. Per-group: `--group-size N` splits `in_features` into blocks of N, each with its own alpha. | Same per-layer |
-| **Attention** | Causal multi-head, KV cache, ternary Q/K/V/O projections | 20% of layers |
-| **SSM Block** | — | 80% of layers: RMSNorm → TernaryLinear(expand 2×) → depthwise Conv1d → SiLU → parallel-prefix SSM scan → gate → TernaryLinear(project back) |
-| **FFN** | SwiGLU: fused gate+up into one ternary matmul (2× FFN dim) | Same |
-| **Sparsification** | Optional `--topk RATIO`: keep top-k% activations after norm, zero rest (STE backward) | Same |
-| **INT8 Forward** | Optional `--int8`: quantize activations → int8 before matmul (QAT effect) | Same |
-| **Normalization** | Pre-norm RMSNorm (always FP32 internally) | Same |
-| **Tokenizer** | Custom BPE (default, vocab=8192) or GPT-2 (`--tokenizer-dir gpt2`, vocab=50257) | Same |
+| Component | STE / Stochastic | Hybrid | MLA |
+|-----------|-----------------|--------|-----|
+| **Weights** | {-1, 0, +1} via absmean (STE) or packed 2-bit (Stochastic). Optional per-channel or per-group scaling alpha. Per-group: `--group-size N` splits `in_features` into blocks of N, each with its own alpha. | Same per-layer | Same |
+| **Attention** | Causal multi-head, KV cache, ternary Q/K/V/O projections | 20% of layers | MLA: K,V compressed to latent (default 64-dim), decoupled RoPE (default 8-dim/head). 7 ternary projections: q, kv_down, k_up, v_up, q_rope, k_rope, o. KV cache reduced 4×. |
+| **SSM Block** | — | 80% of layers: RMSNorm → TernaryLinear(expand 2×) → depthwise Conv1d → SiLU → parallel-prefix SSM scan → gate → TernaryLinear(project back) | — |
+| **FFN** | SwiGLU: fused gate+up into one ternary matmul (2× FFN dim) | Same | Same |
+| **Sparsification** | Optional `--topk RATIO`: keep top-k% activations after norm, zero rest (STE backward) | Same | Same |
+| **INT8 Forward** | Optional `--int8`: quantize activations → int8 before matmul (QAT effect) | Same | Same |
+| **Normalization** | Pre-norm RMSNorm (always FP32 internally) | Same | Same |
+| **Tokenizer** | Custom BPE (default, vocab=8192) or GPT-2 (`--tokenizer-dir gpt2`, vocab=50257) | Same | Same |
 
 Key design decisions:
 - **Attention & FFN compute in FP32** for numerical stability (q/k/v cast to fp32 before `scaled_dot_product_attention`, SwiGLU hidden cast to fp32 before down-projection). Avoids float16 overflow on large hidden dims.
@@ -49,6 +51,9 @@ python train.py --preset tiny --steps 15000 --dtype float16 --graph
 
 # Resume from latest checkpoint + plot full history
 python train.py --preset tiny --steps 30000 --dtype float16 --graph --resume
+
+# Train with Multi-head Latent Attention (MLA, DeepSeek-V2 style)
+python train.py --preset tiny --steps 15000 --dtype float16 --graph --mla --kv-latent-dim 64 --rope-per-head 8
 
 # Export to C++ binary and run inference
 python inference/export_model.py checkpoints/checkpoint_015000.pt inference/tetra_model.bin
@@ -89,6 +94,7 @@ Pure C++17 inference engine (`inference/tetra.h`, no dependencies):
 |---------|--------|
 | **File size** | 3.6 MB (ternary weights 2-bit packed, embeddings INT8 quantized) |
 | **Speed** | 300+ tok/s (AVX2, CPU), 80+ tok/s (scalar) |
+| **MLA** | Full MLA decode + prefill with KV latent compression, decoupled RoPE, and K/V reconstruction from cached latents |
 | **Prefill** | Parallel batch prefill — all prompt tokens in one forward pass (OpenMP) |
 | **Sampling** | Top-k + top-p + temperature + repetition penalty, matches PyTorch order |
 | **Build** | `build.bat avx2` (auto-detects VS via vswhere, enables `/openmp`) |
@@ -109,7 +115,7 @@ python run_inference.py tetra_model.bin "Once upon a time" --max-tokens 100
 | Section | Encoding |
 |---------|----------|
 | Header (64B) | magic `TETR`, version, dims, param counts |
-| Ternary weights | name, shape, `group_size(2B)` + `num_alphas(2B)` + `alphas(N×4B)`, 2-bit packed (4 weights/byte). `group_size=0` → per-channel or scalar (v3 compat). |
+| Ternary weights | name (suffix `.latent_weights`), shape, `group_size(2B)` + `num_alphas(2B)` + `alphas(N×4B)`, 2-bit packed (4 weights/byte). `group_size=0` → per-channel or scalar (v3 compat). MLA auto-detected from tensor names containing `kv_down_proj`. |
 | FP32/INT8 weights | name, shape, dtype byte: `0`=FP32, `1`=INT8 + scale |
 | Embeddings | INT8 (token 8K×256→2.0 MB, pos 512×256→0.13 MB) |
 | Norms | FP32 (tiny, ~12 KB) |
@@ -209,10 +215,11 @@ ternary_llm/
   quantization.py           # STE + Stochastic Bit-Flip autograd functions, pack/unpack
   layers.py                 # TernaryLinear, StochasticTernaryLinear, RMSNorm, TopKActivation
   attention.py              # MultiHeadAttention with KV cache
+  mla.py                    # StochasticMLAAttention — Multi-head Latent Attention (DeepSeek-V2 style)
   ffn.py                    # SwiGLU FFN: fused gate_up_proj (2×FFN dim)
   ssm.py                    # Ternary SSM block (parallel-prefix scan)
   hybrid.py                 # Hybrid SSM-Attention transformer model
-  transformer.py            # Full model, generate with KV cache, sample
+  transformer.py            # Full model, generate with KV cache, sample (includes StochasticMLABlock/StochasticMLAModel)
   data.py                   # ChunkedDataset, MultiSourceChunkedDataset
   trainer.py                # TernaryTrainer + DMLAdamW
   int8.py                   # INT8 fake-quantization

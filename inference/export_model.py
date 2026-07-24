@@ -171,8 +171,10 @@ def export_model(model, output_path, mode="ste", scale=1.0):
                 written.add(name)
 
                 prefix = name.rsplit(".", 1)[0]
+                layer_idx = name.split(".")[1]  # get layer index for gate_proj fusion check
+                is_ffn_gate = "gate_proj" in name and f"layers.{layer_idx}.ffn" in name
 
-                if "gate_proj" in name:
+                if is_ffn_gate:
                     up_name = name.replace("gate_proj", "up_proj")
                     if up_name not in buffers:
                         continue
@@ -189,7 +191,7 @@ def export_model(model, output_path, mode="ste", scale=1.0):
                         write_ternary_entry(fused, new_name, alphas=combined)
                     else:
                         write_ternary_entry(fused, new_name)
-                elif "up_proj" in name:
+                elif "up_proj" in name and f"layers.{layer_idx}.ffn" in name:
                     continue
                 else:
                     s = get_stochastic_shape(model, name)

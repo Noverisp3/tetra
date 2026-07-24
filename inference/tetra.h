@@ -311,6 +311,33 @@ static float absmean(const float* x, int n) {
     return sum / n;
 }
 
+// === Rotary Position Embedding (RoPE) ===
+static std::vector<float> precompute_rope_freqs(int rope_dim, int max_seq_len) {
+    int num_pairs = rope_dim / 2;
+    std::vector<float> freqs(max_seq_len * num_pairs * 2, 0.0f);
+    for (int pos = 0; pos < max_seq_len; pos++) {
+        for (int i = 0; i < num_pairs; i++) {
+            float freq = 1.0f / powf(10000.0f, (float)(i * 2) / (float)rope_dim);
+            float angle = (float)pos * freq;
+            int idx = (pos * num_pairs + i) * 2;
+            freqs[idx + 0] = cosf(angle);
+            freqs[idx + 1] = sinf(angle);
+        }
+    }
+    return freqs;
+}
+
+static void apply_rope(float* x, int rope_per_head, int pos, const float* freqs) {
+    int num_pairs = rope_per_head / 2;
+    const float* f = freqs + (pos * num_pairs) * 2;
+    for (int i = 0; i < num_pairs; i++) {
+        float a = x[i * 2], b = x[i * 2 + 1];
+        float c = f[i * 2], s = f[i * 2 + 1];
+        x[i * 2 + 0] = a * c - b * s;
+        x[i * 2 + 1] = a * s + b * c;
+    }
+}
+
 // MappedFile: cross-platform memory-mapped file
 struct MappedFile {
 #ifdef _WIN32
@@ -421,6 +448,13 @@ struct Model {
         return fp32_weights.at(name).int8_scale;
     }
     int head_dim() const { return header.hidden_dim / header.num_heads; }
+
+    // MLA fields
+    bool is_mla = false;
+    int kv_latent_dim = 0;
+    int rope_per_head = 0;
+    int rope_dim = 0;
+    std::vector<float> freqs_cis;
 };
 
 static Model load_model(const char* path) {
@@ -447,53 +481,92 @@ static Model load_model(const char* path) {
     fprintf(stderr, "Tetra: %d layers, hidden=%d, heads=%d, ffn=%d, vocab=%d, seq=%d\n",
             h.num_layers, h.hidden_dim, h.num_heads, h.ffn_dim, h.vocab_size, h.max_seq_len);
 
-    for (uint32_t layer = 0; layer < h.num_layers; layer++) {
-        for (int t = 0; t < 6; t++) {
-            uint32_t name_len;
-            r.read(name_len);
-            std::string name = r.read_str(name_len);
+    // Read ternary weights: read until we hit FP32 section
+    // (ternary names end with ".latent_weights", FP32 names don't)
+    int ternary_count = 0;
+    while (r.pos < r.end - 4) {
+        // Peek name length to detect FP32 section
+        uint32_t peek_len;
+        memcpy(&peek_len, r.pos, 4);
+        if (peek_len > 1024 || peek_len == 0) break;
 
-            uint16_t rows, cols;
-            r.read(rows);
-            r.read(cols);
-
-            float alpha = 1.0f;
-            int group_size = 0;
-            std::vector<float> alphas;
-            if (h.version >= 4) {
-                uint16_t gs, num_alphas;
-                r.read(gs);
-                r.read(num_alphas);
-                group_size = gs;
-                if (num_alphas > 0) {
-                    alphas.resize(num_alphas);
-                    r.read_bytes(alphas.data(), num_alphas * sizeof(float));
-                }
-            } else if (h.version >= 3) {
-                uint16_t num_alphas;
-                r.read(num_alphas);
-                if (num_alphas > 0) {
-                    alphas.resize(num_alphas);
-                    r.read_bytes(alphas.data(), num_alphas * sizeof(float));
-                }
-            } else if (h.version >= 2) {
-                r.read(alpha);
-            }
-
-            int packed_size = (rows * cols + 3) / 4;
-            std::vector<uint8_t> packed(packed_size);
-            r.read_bytes(packed.data(), packed_size);
-
-            TernaryWeightXNOR w;
-            w.rows = rows;
-            w.cols = cols;
-            w.group_size = group_size;
-            w.alpha = alpha;
-            w.alphas = std::move(alphas);
-            w.packed = std::move(packed);
-            precompute_floats(w);
-            model.ternary_weights[name] = std::move(w);
+        const uint8_t* name_start = r.pos + 4;
+        // Check if name ends with "latent_weights"
+        bool is_ternary = false;
+        if (peek_len > 13) {
+            const char* name_cstr = (const char*)name_start;
+            const char* suffix = "latent_weights";
+            int slen = 14;
+            is_ternary = (peek_len >= (uint32_t)slen &&
+                         memcmp(name_cstr + peek_len - slen, suffix, slen) == 0);
         }
+
+        if (!is_ternary) break;  // FP32 section starts
+
+        uint32_t name_len;
+        r.read(name_len);
+        std::string name = r.read_str(name_len);
+
+        uint16_t rows, cols;
+        r.read(rows);
+        r.read(cols);
+
+        int group_size = 0;
+        std::vector<float> alphas;
+        if (h.version >= 4) {
+            uint16_t gs, num_alphas;
+            r.read(gs);
+            r.read(num_alphas);
+            group_size = gs;
+            if (num_alphas > 0) {
+                alphas.resize(num_alphas);
+                r.read_bytes(alphas.data(), num_alphas * sizeof(float));
+            }
+        } else if (h.version >= 3) {
+            uint16_t num_alphas;
+            r.read(num_alphas);
+            if (num_alphas > 0) {
+                alphas.resize(num_alphas);
+                r.read_bytes(alphas.data(), num_alphas * sizeof(float));
+            }
+        } else if (h.version >= 2) {
+            float alpha;
+            r.read(alpha);
+            alphas.push_back(alpha);
+        }
+
+        int packed_size = (rows * cols + 3) / 4;
+        std::vector<uint8_t> packed(packed_size);
+        r.read_bytes(packed.data(), packed_size);
+
+        TernaryWeightXNOR w;
+        w.rows = rows;
+        w.cols = cols;
+        w.group_size = group_size;
+        w.alpha = alphas.empty() ? 1.0f : alphas[0];
+        w.alphas = std::move(alphas);
+        w.packed = std::move(packed);
+        precompute_floats(w);
+        model.ternary_weights[name] = std::move(w);
+        ternary_count++;
+
+        // Detect MLA from tensor names
+        if (name.find("kv_down_proj") != std::string::npos)
+            model.is_mla = true;
+    }
+
+    // Extract MLA dimensions from ternaries
+    if (model.is_mla) {
+        for (auto& [name, w] : model.ternary_weights) {
+            if (name.find("kv_down_proj") != std::string::npos) {
+                model.kv_latent_dim = w.rows;  // kv_down: out=latent_dim, in=hidden
+            }
+            if (name.find("q_rope_proj") != std::string::npos) {
+                model.rope_dim = w.rows;  // q_rope: out=rope_dim, in=hidden
+                model.rope_per_head = w.rows / h.num_heads;
+            }
+        }
+        model.freqs_cis = precompute_rope_freqs(model.rope_per_head, h.max_seq_len);
     }
 
     // Read FP32/INT8 weights
@@ -543,11 +616,20 @@ static Model load_model(const char* path) {
 struct KVCache {
     std::vector<std::vector<float>> k_cache;
     std::vector<std::vector<float>> v_cache;
+    // MLA latent + RoPE cache
+    std::vector<std::vector<float>> latent_cache;
+    std::vector<std::vector<float>> k_rope_cache;
     int pos = 0;
 
-    void init(int num_layers, int max_seq_len, int dim) {
-        k_cache.resize(num_layers, std::vector<float>(max_seq_len * dim, 0.0f));
-        v_cache.resize(num_layers, std::vector<float>(max_seq_len * dim, 0.0f));
+    void init(int num_layers, int max_seq_len, int dim,
+              bool is_mla = false, int kv_latent_dim = 0, int rope_dim = 0) {
+        if (is_mla) {
+            latent_cache.resize(num_layers, std::vector<float>(max_seq_len * kv_latent_dim, 0.0f));
+            k_rope_cache.resize(num_layers, std::vector<float>(max_seq_len * rope_dim, 0.0f));
+        } else {
+            k_cache.resize(num_layers, std::vector<float>(max_seq_len * dim, 0.0f));
+            v_cache.resize(num_layers, std::vector<float>(max_seq_len * dim, 0.0f));
+        }
         pos = 0;
     }
 };
@@ -568,7 +650,6 @@ static std::vector<float> forward(
     bool decode = (seq_len == 1);
 
     const float* tok_emb = model.fw_ptr("token_embedding.weight");
-    const float* pos_emb = model.fw_ptr("pos_embedding.weight");
     int pos = cache.pos;
 
     if (decode) {
@@ -577,8 +658,15 @@ static std::vector<float> forward(
         std::vector<float> attn_out(H);
         std::vector<float> gate(FFN), up(FFN), hidden(FFN), ffn_out(H);
 
-        for (int i = 0; i < H; i++)
-            x[i] = tok_emb[tokens.back() * H + i] + pos_emb[pos * H + i];
+        if (model.is_mla) {
+            // MLA decode: no learned pos_emb, uses RoPE
+            for (int i = 0; i < H; i++)
+                x[i] = tok_emb[tokens.back() * H + i];
+        } else {
+            const float* pos_emb = model.fw_ptr("pos_embedding.weight");
+            for (int i = 0; i < H; i++)
+                x[i] = tok_emb[tokens.back() * H + i] + pos_emb[pos * H + i];
+        }
 
         for (int l = 0; l < L; l++) {
             char pfx[64];
@@ -589,46 +677,143 @@ static std::vector<float> forward(
             rmsnorm(normed.data(), model.fw_ptr(std::string(pfx) + "attn_norm.weight"), H);
             float x_scale = absmean(normed.data(), H);
 
-            std::string qn = std::string(pfx) + "attn.q_proj.latent_weights";
-            std::string kn = std::string(pfx) + "attn.k_proj.latent_weights";
-            std::string vn = std::string(pfx) + "attn.v_proj.latent_weights";
-            std::string on = std::string(pfx) + "attn.o_proj.latent_weights";
+            if (model.is_mla) {
+                const int KV = model.kv_latent_dim;
+                const int RP = model.rope_per_head;
+                const int RD = model.rope_dim;
+                const int EHD = HD + RP;  // effective head dim with RoPE
 
-            ternary_matmul_auto(normed.data(), model.tw(qn), q.data(), x_scale, decode);
-            ternary_matmul_auto(normed.data(), model.tw(kn), k.data(), x_scale, decode);
-            ternary_matmul_auto(normed.data(), model.tw(vn), v.data(), x_scale, decode);
+                std::string pfx_s(pfx);
+                std::string qn = pfx_s + "attn.q_proj.latent_weights";
+                std::string kdn = pfx_s + "attn.kv_down_proj.latent_weights";
+                std::string kun = pfx_s + "attn.k_up_proj.latent_weights";
+                std::string vun = pfx_s + "attn.v_up_proj.latent_weights";
+                std::string qrn = pfx_s + "attn.q_rope_proj.latent_weights";
+                std::string krn = pfx_s + "attn.k_rope_proj.latent_weights";
+                std::string on = pfx_s + "attn.o_proj.latent_weights";
 
-            for (int i = 0; i < H; i++) {
-                cache.k_cache[l][pos * H + i] = k[i];
-                cache.v_cache[l][pos * H + i] = v[i];
-            }
+                // Q main
+                ternary_matmul_auto(normed.data(), model.tw(qn), q.data(), x_scale, decode);
 
-            for (int head = 0; head < NH; head++) {
-                float scale = 1.0f / sqrtf((float)HD);
+                // KV latent for current token
+                std::vector<float> kv_latent(KV);
+                ternary_matmul_auto(normed.data(), model.tw(kdn), kv_latent.data(), x_scale, decode);
+
+                // Q/K RoPE
+                std::vector<float> q_rope(RD), k_rope(RD);
+                ternary_matmul_auto(normed.data(), model.tw(qrn), q_rope.data(), x_scale, decode);
+                ternary_matmul_auto(normed.data(), model.tw(krn), k_rope.data(), x_scale, decode);
+
+                // Apply RoPE per head
+                const float* fc = model.freqs_cis.data();
+                for (int h = 0; h < NH; h++) {
+                    apply_rope(q_rope.data() + h * RP, RP, pos, fc);
+                    apply_rope(k_rope.data() + h * RP, RP, pos, fc);
+                }
+
+                // Store in MLA cache
+                int lc_pos = pos * KV;
+                for (int i = 0; i < KV; i++)
+                    cache.latent_cache[l][lc_pos + i] = kv_latent[i];
+                int krc_pos = pos * RD;
+                for (int i = 0; i < RD; i++)
+                    cache.k_rope_cache[l][krc_pos + i] = k_rope[i];
+
+                // Reconstruct K and V from ALL cached latents
                 int actual_len = pos + 1;
-                const float* q_head = q.data() + head * HD;
+                const auto& kup = model.tw(kun);
+                const auto& vup = model.tw(vun);
+                const float* kup_d = kup.floats.data();
+                const float* vup_d = vup.floats.data();
+
+                // K = k_up @ latent_cache, V = v_up @ latent_cache
+                // For each position t, reconstruct K[t] and V[t]
+                std::vector<float> k_full(actual_len * H), v_full(actual_len * H);
                 for (int t = 0; t < actual_len; t++) {
-                    float s = dot_product_simd(q_head,
-                        cache.k_cache[l].data() + t * H + head * HD, HD) * scale;
-                    if (s > 80.0f) s = 80.0f;
-                    else if (s < -80.0f) s = -80.0f;
-                    attn_scores[t] = s;
+                    const float* lt = cache.latent_cache[l].data() + t * KV;
+                    float* kt = k_full.data() + t * H;
+                    float* vt = v_full.data() + t * H;
+                    for (int r = 0; r < H; r++) {
+                        kt[r] = dot_product_simd(lt, kup_d + r * KV, KV);
+                        vt[r] = dot_product_simd(lt, vup_d + r * KV, KV);
+                    }
                 }
-                softmax(attn_scores.data(), actual_len);
-                for (int d = 0; d < HD; d++) {
-                    float sum = 0.0f;
-                    for (int t = 0; t < actual_len; t++)
-                        sum += attn_scores[t] * cache.v_cache[l][t * H + head * HD + d];
-                    attn_out[head * HD + d] = sum;
+
+                // Also get cached K_rope for all positions
+                std::vector<float> k_rope_all(actual_len * RD);
+                for (int t = 0; t < actual_len; t++)
+                    for (int i = 0; i < RD; i++)
+                        k_rope_all[t * RD + i] = cache.k_rope_cache[l][t * RD + i];
+
+                float eff_scale = 1.0f / sqrtf((float)EHD);
+                for (int head = 0; head < NH; head++) {
+                    // Q has [Q_main | Q_rope] per head
+                    float* qh = q.data() + head * HD;
+                    float* qrh = q_rope.data() + head * RP;
+
+                    for (int t = 0; t < actual_len; t++) {
+                        float* kh = k_full.data() + t * H + head * HD;
+                        float* krh = k_rope_all.data() + t * RD + head * RP;
+                        float s = dot_product_simd(qh, kh, HD) * eff_scale;
+                        s += dot_product_simd(qrh, krh, RP) * eff_scale;
+                        if (s > 80.0f) s = 80.0f;
+                        else if (s < -80.0f) s = -80.0f;
+                        attn_scores[t] = s;
+                    }
+                    softmax(attn_scores.data(), actual_len);
+                    for (int d = 0; d < HD; d++) {
+                        float sum = 0.0f;
+                        for (int t = 0; t < actual_len; t++)
+                            sum += attn_scores[t] * v_full[t * H + head * HD + d];
+                        attn_out[head * HD + d] = sum;
+                    }
                 }
+                std::vector<float> proj_out(H);
+                float o_scale = absmean(attn_out.data(), H);
+                ternary_matmul_auto(attn_out.data(), model.tw(on), proj_out.data(), o_scale, decode);
+                for (int i = 0; i < H; i++) x[i] += proj_out[i];
+            } else {
+                std::string qn = std::string(pfx) + "attn.q_proj.latent_weights";
+                std::string kn = std::string(pfx) + "attn.k_proj.latent_weights";
+                std::string vn = std::string(pfx) + "attn.v_proj.latent_weights";
+                std::string on = std::string(pfx) + "attn.o_proj.latent_weights";
+
+                ternary_matmul_auto(normed.data(), model.tw(qn), q.data(), x_scale, decode);
+                ternary_matmul_auto(normed.data(), model.tw(kn), k.data(), x_scale, decode);
+                ternary_matmul_auto(normed.data(), model.tw(vn), v.data(), x_scale, decode);
+
+                for (int i = 0; i < H; i++) {
+                    cache.k_cache[l][pos * H + i] = k[i];
+                    cache.v_cache[l][pos * H + i] = v[i];
+                }
+
+                for (int head = 0; head < NH; head++) {
+                    float scale = 1.0f / sqrtf((float)HD);
+                    int actual_len = pos + 1;
+                    const float* q_head = q.data() + head * HD;
+                    for (int t = 0; t < actual_len; t++) {
+                        float s = dot_product_simd(q_head,
+                            cache.k_cache[l].data() + t * H + head * HD, HD) * scale;
+                        if (s > 80.0f) s = 80.0f;
+                        else if (s < -80.0f) s = -80.0f;
+                        attn_scores[t] = s;
+                    }
+                    softmax(attn_scores.data(), actual_len);
+                    for (int d = 0; d < HD; d++) {
+                        float sum = 0.0f;
+                        for (int t = 0; t < actual_len; t++)
+                            sum += attn_scores[t] * cache.v_cache[l][t * H + head * HD + d];
+                        attn_out[head * HD + d] = sum;
+                    }
+                }
+
+                std::vector<float> proj_out(H);
+                float o_scale = absmean(attn_out.data(), H);
+                ternary_matmul_auto(attn_out.data(), model.tw(on), proj_out.data(), o_scale, decode);
+                for (int i = 0; i < H; i++) x[i] += proj_out[i];
             }
 
-            std::vector<float> proj_out(H);
-            float o_scale = absmean(attn_out.data(), H);
-            ternary_matmul_auto(attn_out.data(), model.tw(on), proj_out.data(), o_scale, decode);
-            for (int i = 0; i < H; i++) x[i] += proj_out[i];
-
-            // FFN (pre-norm)
+            // FFN (pre-norm) — shared between MLA and standard
             std::vector<float> ffn_normed = x;
             rmsnorm(ffn_normed.data(), model.fw_ptr(std::string(pfx) + "ffn_norm.weight"), H);
             float ffn_scale = absmean(ffn_normed.data(), H);
@@ -660,12 +845,22 @@ static std::vector<float> forward(
         return logits;
     }
 
+    // ============================================================
+    // Prefill path (seq_len > 1)
+    // ============================================================
     std::vector<float> x(seq_len * H);
 
-    // Embedding for all positions
-    for (int j = 0; j < seq_len; j++)
-        for (int i = 0; i < H; i++)
-            x[j * H + i] = tok_emb[tokens[j] * H + i] + pos_emb[(pos + j) * H + i];
+    if (model.is_mla) {
+        // MLA prefill: no learned pos_emb
+        for (int j = 0; j < seq_len; j++)
+            for (int i = 0; i < H; i++)
+                x[j * H + i] = tok_emb[tokens[j] * H + i];
+    } else {
+        const float* pos_emb = model.fw_ptr("pos_embedding.weight");
+        for (int j = 0; j < seq_len; j++)
+            for (int i = 0; i < H; i++)
+                x[j * H + i] = tok_emb[tokens[j] * H + i] + pos_emb[(pos + j) * H + i];
+    }
 
     std::vector<float> q(seq_len * H), k(seq_len * H), v(seq_len * H);
     std::vector<float> attn_out(seq_len * H);
@@ -676,63 +871,180 @@ static std::vector<float> forward(
     for (int l = 0; l < L; l++) {
         char pfx[64];
         snprintf(pfx, sizeof(pfx), "layers.%d.", l);
+        std::string pfx_s(pfx);
 
-        // Pre-norm + QKV for all positions (save original x for residual)
-        #pragma omp parallel for if(seq_len > 1)
-        for (int j = 0; j < seq_len; j++) {
-            float* xj = x.data() + j * H;
-            std::vector<float> normed(H);
-            memcpy(normed.data(), xj, H * sizeof(float));
-            rmsnorm(normed.data(), model.fw_ptr(std::string(pfx) + "attn_norm.weight"), H);
-            float xs = absmean(normed.data(), H);
-            ternary_matmul_auto(normed.data(), model.tw(std::string(pfx) + "attn.q_proj.latent_weights"), q.data() + j * H, xs, false);
-            ternary_matmul_auto(normed.data(), model.tw(std::string(pfx) + "attn.k_proj.latent_weights"), k.data() + j * H, xs, false);
-            ternary_matmul_auto(normed.data(), model.tw(std::string(pfx) + "attn.v_proj.latent_weights"), v.data() + j * H, xs, false);
-        }
+        if (model.is_mla) {
+            const int KV = model.kv_latent_dim;
+            const int RP = model.rope_per_head;
+            const int RD = model.rope_dim;
+            const int EHD = HD + RP;
+            float eff_scale = 1.0f / sqrtf((float)EHD);
 
-        // Store K, V for all new positions
-        for (int j = 0; j < seq_len; j++)
-            for (int i = 0; i < H; i++) {
-                cache.k_cache[l][(pos + j) * H + i] = k[j * H + i];
-                cache.v_cache[l][(pos + j) * H + i] = v[j * H + i];
-            }
+            std::string qn = pfx_s + "attn.q_proj.latent_weights";
+            std::string kdn = pfx_s + "attn.kv_down_proj.latent_weights";
+            std::string kun = pfx_s + "attn.k_up_proj.latent_weights";
+            std::string vun = pfx_s + "attn.v_up_proj.latent_weights";
+            std::string qrn = pfx_s + "attn.q_rope_proj.latent_weights";
+            std::string krn = pfx_s + "attn.k_rope_proj.latent_weights";
+            std::string on = pfx_s + "attn.o_proj.latent_weights";
 
-        // Causal multi-head attention for each position
-        #pragma omp parallel for if(seq_len > 1)
-        for (int j = 0; j < seq_len; j++) {
-            std::vector<float> attn_local(model.header.max_seq_len);
-            int actual_len = pos + j + 1;
-            for (int head = 0; head < NH; head++) {
-                float scale = 1.0f / sqrtf((float)HD);
-                const float* q_head = q.data() + j * H + head * HD;
-                for (int t = 0; t < actual_len; t++) {
-                    float s = dot_product_simd(q_head,
-                        cache.k_cache[l].data() + t * H + head * HD, HD) * scale;
-                    if (s > 80.0f) s = 80.0f;
-                    else if (s < -80.0f) s = -80.0f;
-                    attn_local[t] = s;
-                }
-                softmax(attn_local.data(), actual_len);
-                for (int d = 0; d < HD; d++) {
-                    float sum = 0.0f;
-                    for (int t = 0; t < actual_len; t++)
-                        sum += attn_local[t] * cache.v_cache[l][t * H + head * HD + d];
-                    attn_out[j * H + head * HD + d] = sum;
+            // Per-position compute: Q, kv_latent, Q/K RoPE
+            std::vector<float> kv_latent_all(seq_len * KV);
+            std::vector<float> q_rope_all(seq_len * RD);
+            std::vector<float> k_rope_all(seq_len * RD);
+
+            #pragma omp parallel for if(seq_len > 1)
+            for (int j = 0; j < seq_len; j++) {
+                float* xj = x.data() + j * H;
+                std::vector<float> normed(H);
+                memcpy(normed.data(), xj, H * sizeof(float));
+                rmsnorm(normed.data(), model.fw_ptr(pfx_s + "attn_norm.weight"), H);
+                float xs = absmean(normed.data(), H);
+
+                ternary_matmul_auto(normed.data(), model.tw(qn), q.data() + j * H, xs, false);
+                ternary_matmul_auto(normed.data(), model.tw(kdn), kv_latent_all.data() + j * KV, xs, false);
+                ternary_matmul_auto(normed.data(), model.tw(qrn), q_rope_all.data() + j * RD, xs, false);
+                ternary_matmul_auto(normed.data(), model.tw(krn), k_rope_all.data() + j * RD, xs, false);
+
+                const float* fc = model.freqs_cis.data();
+                for (int h = 0; h < NH; h++) {
+                    int p = pos + j;
+                    apply_rope(q_rope_all.data() + j * RD + h * RP, RP, p, fc);
+                    apply_rope(k_rope_all.data() + j * RD + h * RP, RP, p, fc);
                 }
             }
+
+            // Reconstruct K and V from latent for all positions
+            const float* kup_d = model.tw(kun).floats.data();
+            const float* vup_d = model.tw(vun).floats.data();
+            std::vector<float> k_full(seq_len * H), v_full(seq_len * H);
+            for (int j = 0; j < seq_len; j++) {
+                const float* lt = kv_latent_all.data() + j * KV;
+                float* kj = k_full.data() + j * H;
+                float* vj = v_full.data() + j * H;
+                for (int r = 0; r < H; r++) {
+                    kj[r] = dot_product_simd(lt, kup_d + r * KV, KV);
+                    vj[r] = dot_product_simd(lt, vup_d + r * KV, KV);
+                }
+            }
+
+            // Store in MLA cache for future decode steps
+            for (int j = 0; j < seq_len; j++) {
+                int ci = (pos + j) * KV;
+                for (int i = 0; i < KV; i++)
+                    cache.latent_cache[l][ci + i] = kv_latent_all[j * KV + i];
+                ci = (pos + j) * RD;
+                for (int i = 0; i < RD; i++)
+                    cache.k_rope_cache[l][ci + i] = k_rope_all[j * RD + i];
+            }
+
+            // Attention
+            #pragma omp parallel for if(seq_len > 1)
+            for (int j = 0; j < seq_len; j++) {
+                std::vector<float> attn_local(model.header.max_seq_len);
+                int actual_len = pos + j + 1;
+                int total_pos = seq_len;
+
+                // For prefill we need K/V up to actual_len, not just this batch
+                std::vector<float> k_local(H * actual_len), v_local(H * actual_len);
+                // We have k_full/v_full for this batch (positions pos to pos+seq_len-1)
+                // But we also need K/V from cache for earlier positions (0 to pos-1)
+                // The full K/V = [cache up to pos] + [k_full/v_full for this batch]
+                // Since we just stored the cached positions in k_full/v_full,
+                // we can reconstruct from latent_cache for all positions
+
+                // Actually, we already computed K/V for all positions in the batch
+                // and the cache already has K/V from previous calls (but for prefill,
+                // this is the first call, so cache is empty)
+                // Let's just use k_full/v_full up to actual_len
+
+                for (int head = 0; head < NH; head++) {
+                    float* qh = q.data() + j * H + head * HD;
+                    float* qrh = q_rope_all.data() + j * RD + head * RP;
+                    for (int t = 0; t < actual_len; t++) {
+                        float* kh = k_full.data() + t * H + head * HD;
+                        float* krh = k_rope_all.data() + t * RD + head * RP;
+                        float s = dot_product_simd(qh, kh, HD) * eff_scale;
+                        s += dot_product_simd(qrh, krh, RP) * eff_scale;
+                        if (s > 80.0f) s = 80.0f;
+                        else if (s < -80.0f) s = -80.0f;
+                        attn_local[t] = s;
+                    }
+                    softmax(attn_local.data(), actual_len);
+                    for (int d = 0; d < HD; d++) {
+                        float sum = 0.0f;
+                        for (int t = 0; t < actual_len; t++)
+                            sum += attn_local[t] * v_full[t * H + head * HD + d];
+                        attn_out[j * H + head * HD + d] = sum;
+                    }
+                }
+            }
+
+            // Output projection
+            #pragma omp parallel for if(seq_len > 1)
+            for (int j = 0; j < seq_len; j++) {
+                float* xj = x.data() + j * H;
+                float os = absmean(attn_out.data() + j * H, H);
+                std::vector<float> proj_out(H);
+                ternary_matmul_auto(attn_out.data() + j * H, model.tw(on), proj_out.data(), os, false);
+                for (int i = 0; i < H; i++) xj[i] += proj_out[i];
+            }
+        } else {
+            // Standard prefill (existing code)
+            #pragma omp parallel for if(seq_len > 1)
+            for (int j = 0; j < seq_len; j++) {
+                float* xj = x.data() + j * H;
+                std::vector<float> normed(H);
+                memcpy(normed.data(), xj, H * sizeof(float));
+                rmsnorm(normed.data(), model.fw_ptr(std::string(pfx) + "attn_norm.weight"), H);
+                float xs = absmean(normed.data(), H);
+                ternary_matmul_auto(normed.data(), model.tw(std::string(pfx) + "attn.q_proj.latent_weights"), q.data() + j * H, xs, false);
+                ternary_matmul_auto(normed.data(), model.tw(std::string(pfx) + "attn.k_proj.latent_weights"), k.data() + j * H, xs, false);
+                ternary_matmul_auto(normed.data(), model.tw(std::string(pfx) + "attn.v_proj.latent_weights"), v.data() + j * H, xs, false);
+            }
+
+            for (int j = 0; j < seq_len; j++)
+                for (int i = 0; i < H; i++) {
+                    cache.k_cache[l][(pos + j) * H + i] = k[j * H + i];
+                    cache.v_cache[l][(pos + j) * H + i] = v[j * H + i];
+                }
+
+            #pragma omp parallel for if(seq_len > 1)
+            for (int j = 0; j < seq_len; j++) {
+                std::vector<float> attn_local(model.header.max_seq_len);
+                int actual_len = pos + j + 1;
+                for (int head = 0; head < NH; head++) {
+                    float scale = 1.0f / sqrtf((float)HD);
+                    const float* q_head = q.data() + j * H + head * HD;
+                    for (int t = 0; t < actual_len; t++) {
+                        float s = dot_product_simd(q_head,
+                            cache.k_cache[l].data() + t * H + head * HD, HD) * scale;
+                        if (s > 80.0f) s = 80.0f;
+                        else if (s < -80.0f) s = -80.0f;
+                        attn_local[t] = s;
+                    }
+                    softmax(attn_local.data(), actual_len);
+                    for (int d = 0; d < HD; d++) {
+                        float sum = 0.0f;
+                        for (int t = 0; t < actual_len; t++)
+                            sum += attn_local[t] * cache.v_cache[l][t * H + head * HD + d];
+                        attn_out[j * H + head * HD + d] = sum;
+                    }
+                }
+            }
+
+            // Output projection
+            std::vector<float> proj_out(seq_len * H);
+            #pragma omp parallel for if(seq_len > 1)
+            for (int j = 0; j < seq_len; j++) {
+                float* xj = x.data() + j * H;
+                float os = absmean(attn_out.data() + j * H, H);
+                ternary_matmul_auto(attn_out.data() + j * H, model.tw(std::string(pfx) + "attn.o_proj.latent_weights"), proj_out.data() + j * H, os, false);
+                for (int i = 0; i < H; i++) xj[i] += proj_out[j * H + i];
+            }
         }
 
-        // Output projection for all positions
-        std::vector<float> proj_out(seq_len * H);
-        #pragma omp parallel for if(seq_len > 1)
-        for (int j = 0; j < seq_len; j++) {
-            float* xj = x.data() + j * H;
-            float os = absmean(attn_out.data() + j * H, H);
-            ternary_matmul_auto(attn_out.data() + j * H, model.tw(std::string(pfx) + "attn.o_proj.latent_weights"), proj_out.data() + j * H, os, false);
-            for (int i = 0; i < H; i++) xj[i] += proj_out[j * H + i];
-        }
-
-        // FFN for all positions
+        // FFN — shared
         #pragma omp parallel for if(seq_len > 1)
         for (int j = 0; j < seq_len; j++) {
             float* xj = x.data() + j * H;

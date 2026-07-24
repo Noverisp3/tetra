@@ -49,7 +49,8 @@ int main(int argc, char** argv) {
     fprintf(stderr, "Model loaded in %.1f ms\n", load_ms);
 
     tetra::KVCache cache;
-    cache.init(model.header.num_layers, model.header.max_seq_len, model.header.hidden_dim);
+    cache.init(model.header.num_layers, model.header.max_seq_len, model.header.hidden_dim,
+               model.is_mla, model.kv_latent_dim, model.rope_dim);
 
     fprintf(stderr, "Prompt tokens: ");
     for (int t : tokens) fprintf(stderr, "%d ", t);
