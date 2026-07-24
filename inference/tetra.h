@@ -157,27 +157,26 @@ static void precompute_floats(TernaryWeightXNOR& w) {
 static void ternary_matmul_precomputed(
     const float* x, const TernaryWeightXNOR& w, float* out
 ) {
-    const int rows = w.rows;
-    const int cols = w.cols;
+    const float alpha0 = w.alpha;
     const float* data = w.floats.data();
     if (w.group_size > 0) {
-        int num_groups = (cols + w.group_size - 1) / w.group_size;
-        for (int r = 0; r < rows; r++) {
+        int num_groups = (w.cols + w.group_size - 1) / w.group_size;
+        for (int r = 0; r < w.rows; r++) {
             float sum = 0;
             for (int g = 0; g < num_groups; g++) {
                 int offset = g * w.group_size;
-                int gs = (std::min)(w.group_size, cols - offset);
-                sum += w.alphas[r * num_groups + g] * dot_product_simd(x + offset, data + r * cols + offset, gs);
+                int gs = (std::min)(w.group_size, w.cols - offset);
+                sum += w.alphas[r * num_groups + g] * dot_product_simd(x + offset, data + r * w.cols + offset, gs);
             }
             out[r] = sum;
         }
     } else if (!w.alphas.empty()) {
-        for (int r = 0; r < rows; r++) {
-            out[r] = dot_product_simd(x, data + r * cols, cols) * w.alphas[r];
+        for (int r = 0; r < w.rows; r++) {
+            out[r] = dot_product_simd(x, data + r * w.cols, w.cols) * w.alphas[r];
         }
     } else {
-        for (int r = 0; r < rows; r++) {
-            out[r] = dot_product_simd(x, data + r * cols, cols) * w.alpha;
+        for (int r = 0; r < w.rows; r++) {
+            out[r] = dot_product_simd(x, data + r * w.cols, w.cols) * alpha0;
         }
     }
 }
@@ -188,6 +187,7 @@ static void ternary_matmul_precomputed_decode(
 ) {
     const int rows = w.rows;
     const int cols = w.cols;
+    const float alpha0 = w.alpha;
     const float* data = w.floats.data();
     if (w.group_size > 0) {
         int num_groups = (cols + w.group_size - 1) / w.group_size;
@@ -209,7 +209,7 @@ static void ternary_matmul_precomputed_decode(
     } else {
         for (int r = 0; r < rows; r++) {
             if (r + 2 < rows) TETRA_PREFETCH(data + (r + 2) * cols);
-            out[r] = dot_product_simd(x, data + r * cols, cols) * w.alpha;
+            out[r] = dot_product_simd(x, data + r * cols, cols) * alpha0;
         }
     }
 }
