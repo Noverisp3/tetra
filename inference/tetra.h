@@ -619,6 +619,9 @@ struct KVCache {
     // MLA latent + RoPE cache
     std::vector<std::vector<float>> latent_cache;
     std::vector<std::vector<float>> k_rope_cache;
+    // MLA expanded K/V cache (avoids per-step reconstruction from latent)
+    std::vector<std::vector<float>> k_full_cache;
+    std::vector<std::vector<float>> v_full_cache;
     int pos = 0;
 
     void init(int num_layers, int max_seq_len, int dim,
@@ -626,6 +629,8 @@ struct KVCache {
         if (is_mla) {
             latent_cache.resize(num_layers, std::vector<float>(max_seq_len * kv_latent_dim, 0.0f));
             k_rope_cache.resize(num_layers, std::vector<float>(max_seq_len * rope_dim, 0.0f));
+            k_full_cache.resize(num_layers, std::vector<float>(max_seq_len * dim, 0.0f));
+            v_full_cache.resize(num_layers, std::vector<float>(max_seq_len * dim, 0.0f));
         } else {
             k_cache.resize(num_layers, std::vector<float>(max_seq_len * dim, 0.0f));
             v_cache.resize(num_layers, std::vector<float>(max_seq_len * dim, 0.0f));
@@ -681,7 +686,7 @@ static std::vector<float> forward(
                 const int KV = model.kv_latent_dim;
                 const int RP = model.rope_per_head;
                 const int RD = model.rope_dim;
-                const int EHD = HD + RP;  // effective head dim with RoPE
+                const int EHD = HD + RP;
 
                 std::string pfx_s(pfx);
                 std::string qn = pfx_s + "attn.q_proj.latent_weights";
@@ -695,23 +700,31 @@ static std::vector<float> forward(
                 // Q main
                 ternary_matmul_auto(normed.data(), model.tw(qn), q.data(), x_scale, decode);
 
-                // KV latent for current token
+                // KV latent + expand to full K/V for this position
                 std::vector<float> kv_latent(KV);
                 ternary_matmul_auto(normed.data(), model.tw(kdn), kv_latent.data(), x_scale, decode);
+
+                const float* kup_d = model.tw(kun).floats.data();
+                const float* vup_d = model.tw(vun).floats.data();
+                float* kc = cache.k_full_cache[l].data() + pos * H;
+                float* vc = cache.v_full_cache[l].data() + pos * H;
+                for (int r = 0; r < H; r++) {
+                    kc[r] = dot_product_simd(kv_latent.data(), kup_d + r * KV, KV);
+                    vc[r] = dot_product_simd(kv_latent.data(), vup_d + r * KV, KV);
+                }
 
                 // Q/K RoPE
                 std::vector<float> q_rope(RD), k_rope(RD);
                 ternary_matmul_auto(normed.data(), model.tw(qrn), q_rope.data(), x_scale, decode);
                 ternary_matmul_auto(normed.data(), model.tw(krn), k_rope.data(), x_scale, decode);
 
-                // Apply RoPE per head
                 const float* fc = model.freqs_cis.data();
                 for (int h = 0; h < NH; h++) {
                     apply_rope(q_rope.data() + h * RP, RP, pos, fc);
                     apply_rope(k_rope.data() + h * RP, RP, pos, fc);
                 }
 
-                // Store in MLA cache
+                // Store latent + k_rope to cache (for future MLA re-compression if needed)
                 int lc_pos = pos * KV;
                 for (int i = 0; i < KV; i++)
                     cache.latent_cache[l][lc_pos + i] = kv_latent[i];
@@ -719,41 +732,16 @@ static std::vector<float> forward(
                 for (int i = 0; i < RD; i++)
                     cache.k_rope_cache[l][krc_pos + i] = k_rope[i];
 
-                // Reconstruct K and V from ALL cached latents
+                // Attention: read from cached K_full/V_full + K_rope
                 int actual_len = pos + 1;
-                const auto& kup = model.tw(kun);
-                const auto& vup = model.tw(vun);
-                const float* kup_d = kup.floats.data();
-                const float* vup_d = vup.floats.data();
-
-                // K = k_up @ latent_cache, V = v_up @ latent_cache
-                // For each position t, reconstruct K[t] and V[t]
-                std::vector<float> k_full(actual_len * H), v_full(actual_len * H);
-                for (int t = 0; t < actual_len; t++) {
-                    const float* lt = cache.latent_cache[l].data() + t * KV;
-                    float* kt = k_full.data() + t * H;
-                    float* vt = v_full.data() + t * H;
-                    for (int r = 0; r < H; r++) {
-                        kt[r] = dot_product_simd(lt, kup_d + r * KV, KV);
-                        vt[r] = dot_product_simd(lt, vup_d + r * KV, KV);
-                    }
-                }
-
-                // Also get cached K_rope for all positions
-                std::vector<float> k_rope_all(actual_len * RD);
-                for (int t = 0; t < actual_len; t++)
-                    for (int i = 0; i < RD; i++)
-                        k_rope_all[t * RD + i] = cache.k_rope_cache[l][t * RD + i];
-
                 float eff_scale = 1.0f / sqrtf((float)EHD);
                 for (int head = 0; head < NH; head++) {
-                    // Q has [Q_main | Q_rope] per head
                     float* qh = q.data() + head * HD;
                     float* qrh = q_rope.data() + head * RP;
 
                     for (int t = 0; t < actual_len; t++) {
-                        float* kh = k_full.data() + t * H + head * HD;
-                        float* krh = k_rope_all.data() + t * RD + head * RP;
+                        float* kh = cache.k_full_cache[l].data() + t * H + head * HD;
+                        float* krh = cache.k_rope_cache[l].data() + t * RD + head * RP;
                         float s = dot_product_simd(qh, kh, HD) * eff_scale;
                         s += dot_product_simd(qrh, krh, RP) * eff_scale;
                         if (s > 80.0f) s = 80.0f;
@@ -764,7 +752,7 @@ static std::vector<float> forward(
                     for (int d = 0; d < HD; d++) {
                         float sum = 0.0f;
                         for (int t = 0; t < actual_len; t++)
-                            sum += attn_scores[t] * v_full[t * H + head * HD + d];
+                            sum += attn_scores[t] * cache.v_full_cache[l][t * H + head * HD + d];
                         attn_out[head * HD + d] = sum;
                     }
                 }
@@ -888,7 +876,9 @@ static std::vector<float> forward(
             std::string krn = pfx_s + "attn.k_rope_proj.latent_weights";
             std::string on = pfx_s + "attn.o_proj.latent_weights";
 
-            // Per-position compute: Q, kv_latent, Q/K RoPE
+            // Per-position compute: Q, kv_latent, Q/K RoPE, then expand K/V to cache
+            const float* kup_d = model.tw(kun).floats.data();
+            const float* vup_d = model.tw(vun).floats.data();
             std::vector<float> kv_latent_new(seq_len * KV);
             std::vector<float> q_rope(seq_len * RD);
             std::vector<float> k_rope_new(seq_len * RD);
@@ -912,6 +902,15 @@ static std::vector<float> forward(
                     apply_rope(q_rope.data() + j * RD + h * RP, RP, p, fc);
                     apply_rope(k_rope_new.data() + j * RD + h * RP, RP, p, fc);
                 }
+
+                // Expand K/V to full and store to cache
+                const float* lt = kv_latent_new.data() + j * KV;
+                float* kc = cache.k_full_cache[l].data() + (pos + j) * H;
+                float* vc = cache.v_full_cache[l].data() + (pos + j) * H;
+                for (int r = 0; r < H; r++) {
+                    kc[r] = dot_product_simd(lt, kup_d + r * KV, KV);
+                    vc[r] = dot_product_simd(lt, vup_d + r * KV, KV);
+                }
             }
 
             // Store latents + k_rope to cache
@@ -924,33 +923,7 @@ static std::vector<float> forward(
                     cache.k_rope_cache[l][ci + i] = k_rope_new[j * RD + i];
             }
 
-            // Reconstruct K/V from ALL cached latents (0 to pos+seq_len-1)
-            int total_len = pos + seq_len;
-            const float* kup_d = model.tw(kun).floats.data();
-            const float* vup_d = model.tw(vun).floats.data();
-            std::vector<float> k_full(total_len * H), v_full(total_len * H);
-            for (int t = 0; t < total_len; t++) {
-                const float* lt = cache.latent_cache[l].data() + t * KV;
-                float* kt = k_full.data() + t * H;
-                float* vt = v_full.data() + t * H;
-                for (int r = 0; r < H; r++) {
-                    kt[r] = dot_product_simd(lt, kup_d + r * KV, KV);
-                    vt[r] = dot_product_simd(lt, vup_d + r * KV, KV);
-                }
-            }
-
-            // Build full k_rope from cache + new batch
-            std::vector<float> k_rope_full(total_len * RD);
-            for (int t = 0; t < total_len; t++) {
-                float* kr = k_rope_full.data() + t * RD;
-                if (t < pos) {
-                    memcpy(kr, cache.k_rope_cache[l].data() + t * RD, RD * sizeof(float));
-                } else {
-                    memcpy(kr, k_rope_new.data() + (t - pos) * RD, RD * sizeof(float));
-                }
-            }
-
-            // Attention + output projection (fused per position)
+            // Attention + output projection: read K/V directly from cache
             #pragma omp parallel for if(seq_len > 1)
             for (int j = 0; j < seq_len; j++) {
                 std::vector<float> attn_local(model.header.max_seq_len);
@@ -961,8 +934,8 @@ static std::vector<float> forward(
                     float* qh = q.data() + j * H + head * HD;
                     float* qrh = q_rope.data() + j * RD + head * RP;
                     for (int t = 0; t < actual_len; t++) {
-                        float* kh = k_full.data() + t * H + head * HD;
-                        float* krh = k_rope_full.data() + t * RD + head * RP;
+                        float* kh = cache.k_full_cache[l].data() + t * H + head * HD;
+                        float* krh = cache.k_rope_cache[l].data() + t * RD + head * RP;
                         float s = dot_product_simd(qh, kh, HD) * eff_scale;
                         s += dot_product_simd(qrh, krh, RP) * eff_scale;
                         if (s > 80.0f) s = 80.0f;
@@ -973,7 +946,7 @@ static std::vector<float> forward(
                     for (int d = 0; d < HD; d++) {
                         float sum = 0.0f;
                         for (int t = 0; t < actual_len; t++)
-                            sum += attn_local[t] * v_full[t * H + head * HD + d];
+                            sum += attn_local[t] * cache.v_full_cache[l][t * H + head * HD + d];
                         out_j[head * HD + d] = sum;
                     }
                 }
