@@ -146,7 +146,7 @@ class TrainingConfig:
     log_interval: int = 10
 
     # Device
-    device: str = "cpu"
+    device: str = ""
     dtype: str = "float32"
     hybrid_optimizer: bool = False  # Model on GPU, optimizer on CPU (avoids DML fallbacks)
 
